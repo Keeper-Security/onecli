@@ -16,7 +16,7 @@
   "dependencies": {
     "@onecli/agent-protocol": "workspace:*",
     "@onecli/channels": "workspace:*",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@onecli/api": "workspace:*",
@@ -26,6 +26,6 @@
     "esbuild": "^0.28.0",
     "tsx": "^4.19.4",
     "typescript": "5.9.2",
-    "vitest": "^3.2.6"
+    "vitest": "^5.1.0"
   }
 }
