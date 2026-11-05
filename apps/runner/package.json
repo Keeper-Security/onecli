@@ -31,9 +31,9 @@
   },
   "dependencies": {
     "@onecli/agent-protocol": "workspace:*",
-    "undici": "^8.0.0",
+    "undici": "^8.12.2",
     "ws": "^8.18.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@onecli/eslint-config": "workspace:*",
@@ -43,6 +43,6 @@
     "esbuild": "^0.28.0",
     "tsx": "^4.19.4",
     "typescript": "5.9.2",
-    "vitest": "^3.2.6"
+    "vitest": "^5.1.0"
   }
 }

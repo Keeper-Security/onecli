@@ -17,13 +17,13 @@
   },
   "dependencies": {
     "@onecli/channels": "workspace:*",
-    "zod": "^4.3.6"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@onecli/eslint-config": "workspace:*",
     "@onecli/typescript-config": "workspace:*",
     "@types/node": "^22.15.3",
     "typescript": "5.9.2",
-    "vitest": "^3.2.6"
+    "vitest": "^5.1.0"
   }
 }
