@@ -22,6 +22,10 @@ export interface OnePasswordStatusData {
   last_error: string | null;
 }
 
+export interface KeeperSecurityStatusData {
+  last_error: string | null;
+}
+
 export const useVaultStatus = <T = unknown>(provider: string = "bitwarden") => {
   const [status, setStatus] = useState<VaultStatus<T> | null>(null);
   const [loading, setLoading] = useState(true);

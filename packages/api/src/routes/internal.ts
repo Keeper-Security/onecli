@@ -9,6 +9,11 @@ import { z } from "zod";
 import { internalAuth } from "../middleware/internal-auth";
 import { ServiceError } from "../services/errors";
 import {
+  bindOneTimeToken as keepersecurityBindOneTimeToken,
+  resolveSecret as keepersecurityResolveSecret,
+  validateConfig as keepersecurityValidateConfig,
+} from "../services/keepersecurity-service";
+import {
   getItemFields,
   listItems,
   listVaults,
@@ -83,6 +88,37 @@ export const internalRoutes = () => {
       await c.req.json().catch(() => ({})),
     );
     return c.json(await getItemFields(token, vaultId, itemId));
+  });
+
+  // ── Keeper KSM: stateless { config, ... } → value ──
+
+  const keepersecurityBase = z.object({ config: z.string().min(1) });
+
+  app.post("/keepersecurity/bind", async (c) => {
+    const { token } = parseBody(
+      z.object({ token: z.string().min(1) }),
+      await c.req.json().catch(() => ({})),
+    );
+    return c.json({ config: await keepersecurityBindOneTimeToken(token) });
+  });
+
+  app.post("/keepersecurity/validate", async (c) => {
+    const { config } = parseBody(
+      keepersecurityBase,
+      await c.req.json().catch(() => ({})),
+    );
+    await keepersecurityValidateConfig(config);
+    return c.json({ valid: true });
+  });
+
+  app.post("/keepersecurity/resolve", async (c) => {
+    const { config, keepersecurity_ref } = parseBody(
+      keepersecurityBase.extend({ keepersecurity_ref: z.string().min(1) }),
+      await c.req.json().catch(() => ({})),
+    );
+    return c.json({
+      value: await keepersecurityResolveSecret(config, keepersecurity_ref),
+    });
   });
 
   return app;

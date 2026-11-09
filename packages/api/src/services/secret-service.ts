@@ -89,6 +89,7 @@ const assertPathValueSafe = (
   if (
     isPathInjection(config) &&
     valueSource !== "onepassword" &&
+    valueSource !== "keepersecurity" &&
     value &&
     !isPathSafeValue(value.trim())
   ) {
@@ -132,6 +133,14 @@ const buildOnePasswordMetadata = (
     : Prisma.JsonNull;
 };
 
+// Keeper has no display labels; LLM keys resolved from Keeper are API-key mode.
+const buildKeeperSecurityMetadata = (
+  type: string,
+): Prisma.InputJsonValue | typeof Prisma.JsonNull =>
+  type === "anthropic" || type === "openai"
+    ? ({ authMode: "api-key" } as Prisma.InputJsonValue)
+    : Prisma.JsonNull;
+
 export type { CreateSecretInput, UpdateSecretInput };
 
 /** How far back the key-health signal looks — old failures age out, and the
@@ -174,6 +183,7 @@ export const listSecrets = async (scope: ResourceScope) => {
       type: true,
       valueSource: true,
       opRef: true,
+      keepersecurityRef: true,
       hostPattern: true,
       pathPattern: true,
       injectionConfig: true,
@@ -392,6 +402,7 @@ export const createSecret = async (
         type: true,
         valueSource: true,
         opRef: true,
+        keepersecurityRef: true,
         hostPattern: true,
         pathPattern: true,
         createdAt: true,
@@ -401,6 +412,56 @@ export const createSecret = async (
     return {
       ...opSecret,
       attachedAgents: await attachNewLlmKey(scope, opSecret, userId),
+    };
+  }
+
+  // ── Value resolved from Keeper Secrets Manager at request time ──
+  if (valueSource === "keepersecurity") {
+    // Like 1Password, the Keeper connection is per-workspace.
+    if (!scope.workspaceId) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "keepersecurity is only available for workspace-scoped secrets",
+      );
+    }
+    if (!input.keepersecurityRef) {
+      throw new ServiceError("BAD_REQUEST", "Enter a keepersecurity reference");
+    }
+    if (input.type === "anthropic") hostPattern = "api.anthropic.com";
+    if (input.type === "openai") hostPattern = "api.openai.com";
+
+    const keepersecuritySecret = await db.secret.create({
+      data: {
+        name,
+        type: input.type,
+        valueSource: "keepersecurity",
+        encryptedValue: null,
+        keepersecurityRef: input.keepersecurityRef,
+        hostPattern,
+        pathPattern,
+        injectionConfig,
+        metadata: buildKeeperSecurityMetadata(input.type),
+        ...scopeCreate(scope),
+      },
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        valueSource: true,
+        keepersecurityRef: true,
+        hostPattern: true,
+        pathPattern: true,
+        createdAt: true,
+      },
+    });
+
+    return {
+      ...keepersecuritySecret,
+      attachedAgents: await attachNewLlmKey(
+        scope,
+        keepersecuritySecret,
+        userId,
+      ),
     };
   }
 
@@ -432,6 +493,7 @@ export const createSecret = async (
       type: true,
       valueSource: true,
       opRef: true,
+      keepersecurityRef: true,
       hostPattern: true,
       pathPattern: true,
       createdAt: true,
@@ -491,9 +553,26 @@ export const updateSecret = async (
     data.valueSource = "onepassword";
     data.encryptedValue = null;
     data.opRef = input.opRef;
+    data.keepersecurityRef = null;
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
     data.metadata = buildOnePasswordMetadata(secret.type, input.opDisplay);
+  } else if (input.valueSource === "keepersecurity") {
+    if (!scope.workspaceId) {
+      throw new ServiceError(
+        "BAD_REQUEST",
+        "keepersecurity is only available for workspace-scoped secrets",
+      );
+    }
+    if (!input.keepersecurityRef)
+      throw new ServiceError("BAD_REQUEST", "Enter a keepersecurity reference");
+    data.valueSource = "keepersecurity";
+    data.encryptedValue = null;
+    data.keepersecurityRef = input.keepersecurityRef;
+    data.opRef = null;
+    if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
+    if (secret.type === "openai") data.hostPattern = "api.openai.com";
+    data.metadata = buildKeeperSecurityMetadata(secret.type);
   } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)
@@ -508,6 +587,7 @@ export const updateSecret = async (
     data.valueSource = "inline";
     data.encryptedValue = await getCrypto().encrypt(value);
     data.opRef = null;
+    data.keepersecurityRef = null;
 
     if (secret.type === "anthropic" || secret.type === "openai") {
       data.metadata = buildMetadata(secret.type, value);

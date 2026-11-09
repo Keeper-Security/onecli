@@ -1,0 +1,213 @@
+//! Internal HTTP client for the Node "Keeper KSM SDK service".
+//!
+//! The gateway holds the (decrypted) Keeper KSM config and delegates the actual
+//! SDK work — validating a config and resolving a `keeper://` reference — to
+//! the Node API over an authenticated, internal channel.
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// Binding a one-time token registers a new client with Keeper, which can be
+/// slow; Keeper's own SDK allows 30s per request, so allow more than that.
+const BIND_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// A failed internal-API call, classified so the provider can tell a stale
+/// reference (skip the secret) from a transient outage (back off + retry).
+#[derive(Debug)]
+pub enum KeeperSecurityError {
+    /// The reference resolved to nothing — the record was deleted or the field renamed.
+    NotFound(String),
+    /// The request was rejected as invalid (bad reference or bad config).
+    BadRequest(String),
+    /// Network failure, timeout, or server error — retry after a cooldown.
+    Transient(String),
+}
+
+impl std::fmt::Display for KeeperSecurityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(m) | Self::BadRequest(m) | Self::Transient(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+/// Where the api-server answers when nothing overrides it — the bare-metal /
+/// dev default. Containerized layouts always set `INTERNAL_API_URL` (the
+/// self-host compose points it at the api service).
+const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10256";
+
+/// Base URL of the internal Node API: `INTERNAL_API_URL` when set (e.g.
+/// `http://api-server:10256`), else loopback.
+///
+/// Deliberately **not** `APP_URL`. That is the *public* URL users browse to —
+/// a different concept, and since it can now name a real external host, using
+/// it here would send in-container vault calls out over the internet. Split out
+/// for testability, as [`super::super::gateway::response::dashboard_url`] is.
+fn resolve_internal_api_url(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(INTERNAL_API_URL_DEFAULT)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn internal_api_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| resolve_internal_api_url(std::env::var("INTERNAL_API_URL").ok().as_deref()))
+}
+
+/// Shared secret presented to the internal API as `X-Gateway-Secret`.
+fn internal_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(|| std::env::var("GATEWAY_INTERNAL_SECRET").unwrap_or_default())
+}
+
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+#[derive(Deserialize)]
+struct ResolveResponse {
+    value: String,
+}
+
+/// The Node API formats errors as `{ "error": { "message": ..., "type": ... } }`.
+#[derive(Deserialize)]
+struct ErrorBody {
+    error: Option<ErrorDetail>,
+}
+
+#[derive(Deserialize)]
+struct ErrorDetail {
+    message: Option<String>,
+}
+
+/// Bind a single-use one-time token to a reusable KSM config. The token is
+/// consumed by this call, so the caller must persist the returned config.
+pub async fn bind(token: &str) -> Result<String, KeeperSecurityError> {
+    let resp =
+        send_with_timeout("bind", &serde_json::json!({ "token": token }), BIND_TIMEOUT).await?;
+    if !resp.status().is_success() {
+        return Err(classify(resp).await);
+    }
+    #[derive(Deserialize)]
+    struct BindResponse {
+        config: String,
+    }
+    let body: BindResponse = resp
+        .json()
+        .await
+        .map_err(|e| KeeperSecurityError::Transient(format!("invalid bind response: {e}")))?;
+    Ok(body.config)
+}
+
+/// Validate a KSM config (used at pair time and for `status`).
+pub async fn validate(config: &str) -> Result<(), KeeperSecurityError> {
+    let resp = send("validate", &serde_json::json!({ "config": config })).await?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(classify(resp).await)
+}
+
+/// Resolve a `keeper://` reference to its plaintext secret value.
+pub async fn resolve(
+    config: &str,
+    keepersecurity_ref: &str,
+) -> Result<String, KeeperSecurityError> {
+    let resp = send(
+        "resolve",
+        &serde_json::json!({ "config": config, "keepersecurity_ref": keepersecurity_ref }),
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(classify(resp).await);
+    }
+    let body: ResolveResponse = resp
+        .json()
+        .await
+        .map_err(|e| KeeperSecurityError::Transient(format!("invalid resolve response: {e}")))?;
+    Ok(body.value)
+}
+
+async fn send(
+    op: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, KeeperSecurityError> {
+    send_with_timeout(op, body, REQUEST_TIMEOUT).await
+}
+
+async fn send_with_timeout(
+    op: &str,
+    body: &serde_json::Value,
+    timeout: Duration,
+) -> Result<reqwest::Response, KeeperSecurityError> {
+    http()
+        .post(format!(
+            "{}/v1/internal/keepersecurity/{op}",
+            internal_api_url()
+        ))
+        .header("X-Gateway-Secret", internal_secret())
+        .timeout(timeout)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| {
+            KeeperSecurityError::Transient(format!("internal keepersecurity API unreachable: {e}"))
+        })
+}
+
+async fn classify(resp: reqwest::Response) -> KeeperSecurityError {
+    let status = resp.status();
+    let msg = match resp.json::<ErrorBody>().await {
+        Ok(ErrorBody {
+            error: Some(ErrorDetail { message: Some(m) }),
+        }) => m,
+        _ => format!("internal keepersecurity API returned {status}"),
+    };
+    match status.as_u16() {
+        404 => KeeperSecurityError::NotFound(msg),
+        400 => KeeperSecurityError::BadRequest(msg),
+        _ => KeeperSecurityError::Transient(msg),
+    }
+}
+
+// `keeper://` reference shape is validated Node-side (`keepersecurityRefSchema`) at secret
+// write time; the gateway trusts the refs it reads back from validated rows.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_internal_url_wins_and_is_trimmed() {
+        assert_eq!(
+            resolve_internal_api_url(Some("http://api-server:10256/")),
+            "http://api-server:10256"
+        );
+    }
+
+    // The regression guard. This used to fall back to APP_URL — the *public*
+    // URL — which, now that APP_URL can name a real external host, would send
+    // in-container vault calls out over the internet. Loopback is the only
+    // correct answer when nothing explicit is set.
+    //
+    // Asserted through the parameter rather than by setting APP_URL in the
+    // environment: the resolver takes its only input as an argument, so there is
+    // nothing for an env var to reach, and mutating process-wide env here would
+    // race the sibling suites that read APP_URL through a cached `OnceLock`.
+    #[test]
+    fn falls_back_to_loopback_never_to_a_public_url() {
+        assert_eq!(resolve_internal_api_url(None), INTERNAL_API_URL_DEFAULT);
+        assert_eq!(resolve_internal_api_url(Some("")), INTERNAL_API_URL_DEFAULT);
+        assert_eq!(
+            resolve_internal_api_url(Some("   ")),
+            INTERNAL_API_URL_DEFAULT
+        );
+    }
+}

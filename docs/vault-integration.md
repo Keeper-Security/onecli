@@ -1,11 +1,12 @@
 # Vault Integration
 
-Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Two providers are supported, with different models:
+Connect an external password manager to OneCLI so the gateway can inject credentials on-demand, without storing them on the server. Three providers are supported, with two different models:
 
 - **[Bitwarden](https://bitwarden.com)** (via the [Agent Access SDK](https://github.com/bitwarden/agent-access)) — an on-demand fallback: when no server-stored secret matches a request, the gateway asks your vault for a credential by domain.
 - **[1Password](https://1password.com)** (via a Service Account) — a value source for explicit secrets: a secret can reference `op://vault/item/field` instead of storing an encrypted value, and the gateway resolves the reference at request time.
+- **[Keeper Secrets Manager](https://docs.keeper.io/en/keeperpam/secrets-manager/about)** — a value source like 1Password: a secret can reference `keeper://<record-uid>/field/<name>` instead of storing an encrypted value, and the gateway resolves the reference at request time.
 
-Most of this page covers the Bitwarden flow; see [1Password](#1password) below for its setup.
+Most of this page covers the Bitwarden flow; see [1Password](#1password) and [Keeper Secrets Manager](#keeper-secrets-manager) below for their setup.
 
 ## How It Works
 
@@ -77,6 +78,27 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 
 Setup: **Connections** > **Vaults** > **1Password**, paste a Service Account token, then create secrets that reference vault items (the UI has a vault/item/field picker backed by `GET /v1/vault/onepassword/{vaults,items,fields}`).
 
+## Keeper Secrets Manager
+
+Keeper works like 1Password: it is not a hostname-matched fallback, it supplies values for secrets you explicitly point at it. A secret with a `keeper://<record-uid>/field/<name>` reference is resolved through the Keeper Secrets Manager SDK at request time, so the value never sits in the OneCLI database. The connection itself is stored encrypted, per workspace.
+
+Setup:
+
+1. In Keeper, create a Secrets Manager application dedicated to OneCLI, share the records it should read (read-only), and generate a one-time access token.
+2. **Connections** > **External Vaults** > **Keeper**, paste the one-time token (or an existing Secrets Manager configuration) and connect. A one-time token is single-use: OneCLI binds it to a reusable configuration, stores only that configuration (encrypted), and discards the token.
+3. Create a secret (**Custom** or **LLMs** tab), click the Keeper button next to the value field and enter the reference. Attach the secret to an agent as for any other secret.
+
+References use Keeper's [notation](https://docs.keeper.io/en/keeperpam/secrets-manager/about/keeper-notation): `keeper://<record-uid>/field/password` reads a standard field, `keeper://<record-uid>/custom_field/<label>` a custom one. There is no record picker; copy the record UID from Keeper. A record title also works in Keeper's notation, but titles are not unique, so prefer the UID. OneCLI accepts the `field`, `custom_field` and `file` forms (a record, a selector and a name); Keeper's two-part short forms (`/title`, `/notes`, `/type`) are not accepted. The record must be shared with the Secrets Manager application.
+
+Pairing and status are served on the provider-generic routes (`/v1/vault/keepersecurity/{pair,status}`); `pair` takes either `{ "one_time_token": "US:..." }` or `{ "ksm_config": "<base64 or JSON>" }`.
+
+Behavior worth knowing:
+
+- Resolved values are cached in memory for about 60 seconds, so a rotated value can lag by that long. A failed lookup is cached briefly (about 30 seconds) so a broken reference does not hammer Keeper.
+- If a reference cannot be resolved (wrong record or field, record not shared, Keeper unreachable, connection removed), the gateway skips that secret and sends the request without a credential. It never falls back to another value. The reason is in the gateway log; the log records the reference, never the value.
+- If the stored configuration can no longer be decrypted (for example `SECRET_ENCRYPTION_KEY` changed), the connection reports `token decryption failed; re-pair to fix`. Connect again with a new one-time token.
+- Keeper secrets are workspace-scoped; an organization-level secret has no single connection to resolve through.
+
 ## Architecture
 
 The vault system is provider-agnostic: each provider implements the `VaultProvider` trait, and pairing/status/disconnect are served on provider-generic routes.
@@ -85,17 +107,19 @@ The vault system is provider-agnostic: each provider implements the `VaultProvid
 Browser ──► Gateway /v1/vault/:provider/pair   (pairing / connecting)
 Agent   ──► Gateway CONNECT host:443            (credential injection)
               │
-              ├─ DB secrets matched? ──► inject from DB (op:// values resolve via 1Password)
+              ├─ DB secrets matched? ──► inject from DB (op:// and keeper:// values resolve via their vaults)
               └─ No match + Bitwarden paired? ──► ask Bitwarden ──► inject
 ```
 
 Key files:
 
-| File                       | Role                                                        |
-| -------------------------- | ----------------------------------------------------------- |
-| `vault/mod.rs`             | `VaultProvider` trait + `VaultService` orchestrator         |
-| `vault/bitwarden.rs`       | Bitwarden provider (sessions, pairing, caching)             |
-| `vault/bitwarden_db.rs`    | DB-backed identity + session storage                        |
-| `vault/onepassword.rs`     | 1Password provider (Service Account session, `op://` cache) |
-| `vault/onepassword_api.rs` | Bridge to the Node 1Password SDK service                    |
-| `vault/api.rs`             | REST endpoints for pair/status/disconnect + the 1P picker   |
+| File                          | Role                                                        |
+| ----------------------------- | ----------------------------------------------------------- |
+| `vault/mod.rs`                | `VaultProvider` trait + `VaultService` orchestrator         |
+| `vault/bitwarden.rs`          | Bitwarden provider (sessions, pairing, caching)             |
+| `vault/bitwarden_db.rs`       | DB-backed identity + session storage                        |
+| `vault/onepassword.rs`        | 1Password provider (Service Account session, `op://` cache) |
+| `vault/onepassword_api.rs`    | Bridge to the Node 1Password SDK service                    |
+| `vault/keepersecurity.rs`     | Keeper provider (KSM config session, `keeper://` cache)     |
+| `vault/keepersecurity_api.rs` | Bridge to the Node Keeper Secrets Manager SDK service       |
+| `vault/api.rs`                | REST endpoints for pair/status/disconnect + the 1P picker   |
