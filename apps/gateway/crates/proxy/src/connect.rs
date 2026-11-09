@@ -1092,6 +1092,7 @@ impl PolicyEngineExt for PolicyEngine {
             // OAuth token refresh applies only to inline OpenAI secrets; a
             // 1Password-sourced value is always a raw API key (api-key metadata).
             let is_openai_oauth = secret.value_source != "onepassword"
+                && secret.value_source != "keepersecurity"
                 && secret.type_ == "openai"
                 && secret_inject::is_oauth_mode(secret.metadata.as_ref());
 
@@ -1198,6 +1199,32 @@ impl PolicyEngineExt for PolicyEngine {
                             secret_type = %secret.type_,
                             error = %e,
                             "skipping secret: 1Password resolution failed"
+                        );
+                        None
+                    }
+                }
+            }
+            "keepersecurity" => {
+                let Some(keepersecurity_ref) = secret.keepersecurity_ref.as_deref() else {
+                    warn!(
+                        host_pattern = %secret.host_pattern,
+                        secret_type = %secret.type_,
+                        "skipping keepersecurity secret: missing keepersecurity_ref"
+                    );
+                    return None;
+                };
+                match self
+                    .keepersecurity
+                    .resolve_ref(workspace_id, keepersecurity_ref)
+                    .await
+                {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(
+                            host_pattern = %secret.host_pattern,
+                            secret_type = %secret.type_,
+                            error = %e,
+                            "skipping secret: keepersecurity resolution failed"
                         );
                         None
                     }
@@ -2794,6 +2821,7 @@ mod tests {
             value_source: "inline".to_string(),
             encrypted_value: None,
             op_ref: None,
+            keepersecurity_ref: None,
             host_pattern: host_pattern.to_string(),
             path_pattern: None,
             injection_config: None,

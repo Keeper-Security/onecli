@@ -399,6 +399,10 @@ export const queryKeys = {
     folderNames: (connectionId: string, ids: string) =>
       [...queryKeys.googleDrive.all(), "names", connectionId, ids] as const,
   },
+  keepersecurity: {
+    all: () => ["keepersecurity", ...scope()] as const,
+    status: () => [...queryKeys.keepersecurity.all(), "status"] as const,
+  },
   onepassword: {
     all: () => ["onepassword", ...scope()] as const,
     status: () => [...queryKeys.onepassword.all(), "status"] as const,

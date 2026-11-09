@@ -42,6 +42,7 @@ interface SecretCardProps {
     typeLabel: string;
     valueSource?: string;
     opRef?: string | null;
+    keepersecurityRef?: string | null;
     hostPattern: string;
     pathPattern: string | null;
     injectionConfig: unknown;
@@ -115,6 +116,17 @@ export const SecretCard = ({
                   1Password
                 </Badge>
               )}
+              {secret.valueSource === "keepersecurity" && (
+                <Badge variant="outline" className="gap-1 text-[10px]">
+                  <Image
+                    src="/icons/keeper-security.png"
+                    alt="Keeper Security logo"
+                    width={12}
+                    height={12}
+                  />
+                  Keeper
+                </Badge>
+              )}
               {badge && (
                 <Badge variant="outline" className="text-[10px]">
                   {badge}
@@ -137,6 +149,15 @@ export const SecretCard = ({
                   </code>
                 </span>
               )}
+              {secret.valueSource === "keepersecurity" &&
+                secret.keepersecurityRef && (
+                  <span className="text-muted-foreground">
+                    Value:{" "}
+                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
+                      {secret.keepersecurityRef}
+                    </code>
+                  </span>
+                )}
               {secret.pathPattern && (
                 <span className="text-muted-foreground">
                   Path:{" "}

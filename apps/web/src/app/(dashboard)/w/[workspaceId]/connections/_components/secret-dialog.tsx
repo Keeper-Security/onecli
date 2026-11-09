@@ -54,6 +54,7 @@ import {
   type OpSelection,
 } from "./onepassword-picker-dialog";
 import { useOnePasswordReady } from "@/hooks/use-onepassword-picker";
+import { useKeeperSecurityReady } from "@/hooks/use-keepersecurity";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   DEFAULT_GENERIC_INJECTION,
@@ -163,11 +164,17 @@ export interface SecretItem {
   type: string;
   valueSource?: string;
   opRef?: string | null;
+  keepersecurityRef?: string | null;
   hostPattern: string;
   pathPattern: string | null;
   injectionConfig: unknown;
   metadata: Record<string, unknown> | null;
 }
+
+/** Mirrors the API's keepersecurityRefSchema: keeper://<record-uid>/<selector>/<name>. */
+const isKeeperSecurityRef = (v: string): boolean =>
+  v.startsWith("keeper://") &&
+  v.slice(9).split("/").filter(Boolean).length >= 3;
 
 /** Recover readable picker titles for an existing 1Password-sourced secret. */
 const readOpDisplay = (
@@ -249,17 +256,27 @@ export const SecretDialog = ({
   const [advancedOpen, setAdvancedOpen] = useState("");
   const [opSelection, setOpSelection] = useState<OpSelection | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // `null` = not using Keeper; a string (possibly empty) = a Keeper reference
+  // is being entered / is set.
+  const [keepersecurityRef, setKeeperSecurityRef] = useState<string | null>(
+    null,
+  );
 
   // Only poll 1Password connectivity while the dialog is open; deduped across
   // every mounted SecretDialog via the shared query key.
   const { isReady: opConnected } = useOnePasswordReady(open);
+  const { isReady: keepersecurityConnected } = useKeeperSecurityReady(open);
 
   // The value source is implied by whether a 1Password field is chosen — no
   // separate mode toggle. OAuth file upload only applies to a typed OpenAI
   // secret; a 1Password value is always a raw API key.
   const fromOnePassword = !!opSelection;
-  const isOAuthMode =
-    type === "openai" && openaiMode === "codex" && !fromOnePassword;
+  const fromKeeperSecurity = keepersecurityRef !== null;
+  // Any externally sourced value: always a raw API key, never an OAuth file.
+  const fromVault = fromOnePassword || fromKeeperSecurity;
+  const keepersecurityRefValid =
+    fromKeeperSecurity && isKeeperSecurityRef(keepersecurityRef.trim());
+  const isOAuthMode = type === "openai" && openaiMode === "codex" && !fromVault;
 
   // The amber hint under an LLM key input (null for generic secrets, an empty
   // field, or a value that looks right).
@@ -289,6 +306,7 @@ export const SecretDialog = ({
       setAdvancedOpen("");
       setOpenaiMode("api-key");
       setOpSelection(null);
+      setKeeperSecurityRef(null);
       setPickerOpen(false);
       // Custom-connection injection resets here; only the edit and prefill
       // branches below repopulate it.
@@ -305,6 +323,12 @@ export const SecretDialog = ({
             opRef: secret.opRef,
             opDisplay: readOpDisplay(secret.metadata, secret.opRef),
           });
+        }
+        if (
+          secret.valueSource === "keepersecurity" &&
+          secret.keepersecurityRef
+        ) {
+          setKeeperSecurityRef(secret.keepersecurityRef);
         }
         setName(secret.name);
         setValue("");
@@ -362,9 +386,13 @@ export const SecretDialog = ({
   const hasInjectionTarget = !isGeneric || isGenericInjectionValid(generic);
 
   const isValid = isEdit
-    ? hostPattern.trim() && !hostPatternError && hasInjectionTarget
+    ? hostPattern.trim() &&
+      !hostPatternError &&
+      hasInjectionTarget &&
+      (!fromKeeperSecurity || keepersecurityRefValid)
     : isNameValid &&
-      (fromOnePassword || !!value.trim()) &&
+      (fromOnePassword ||
+        (fromKeeperSecurity ? keepersecurityRefValid : !!value.trim())) &&
       hostPattern.trim() &&
       !hostPatternError &&
       hasInjectionTarget;
@@ -402,9 +430,14 @@ export const SecretDialog = ({
                 opRef: opSelection.opRef,
                 opDisplay: opSelection.opDisplay,
               }
-            : value.trim()
-              ? { valueSource: "inline" as const, value: value.trim() }
-              : {}),
+            : fromKeeperSecurity
+              ? {
+                  valueSource: "keepersecurity" as const,
+                  keepersecurityRef: (keepersecurityRef ?? "").trim(),
+                }
+              : value.trim()
+                ? { valueSource: "inline" as const, value: value.trim() }
+                : {}),
           hostPattern,
           pathPattern: effectivePathPattern || null,
           injectionConfig: buildInjectionConfig() ?? undefined,
@@ -423,14 +456,24 @@ export const SecretDialog = ({
                 pathPattern: effectivePathPattern || undefined,
                 injectionConfig: buildInjectionConfig() ?? null,
               }
-            : {
-                name,
-                type,
-                value,
-                hostPattern,
-                pathPattern: effectivePathPattern || undefined,
-                injectionConfig: buildInjectionConfig() ?? null,
-              },
+            : fromKeeperSecurity
+              ? {
+                  name,
+                  type,
+                  valueSource: "keepersecurity",
+                  keepersecurityRef: (keepersecurityRef ?? "").trim(),
+                  hostPattern,
+                  pathPattern: effectivePathPattern || undefined,
+                  injectionConfig: buildInjectionConfig() ?? null,
+                }
+              : {
+                  name,
+                  type,
+                  value,
+                  hostPattern,
+                  pathPattern: effectivePathPattern || undefined,
+                  injectionConfig: buildInjectionConfig() ?? null,
+                },
         );
         created = { id, name };
         toast.success(isGeneric ? "Connection added" : "Secret created");
@@ -515,12 +558,20 @@ export const SecretDialog = ({
               <DialogDescription>
                 {isGeneric
                   ? isEdit
-                    ? "Change where it goes, or paste a new API key / Secret."
-                    : "Paste an API key / Secret and where it goes."
+                    ? fromKeeperSecurity
+                      ? "Change where it goes, or point it at a different Keeper record."
+                      : "Change where it goes, or paste a new API key / Secret."
+                    : fromKeeperSecurity
+                      ? "Reference a Keeper record and say where it goes."
+                      : "Paste an API key / Secret and where it goes."
                   : isEdit
-                    ? "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
+                    ? fromKeeperSecurity
+                      ? "Update the secret\u2019s configuration, or point it at a different Keeper record."
+                      : "Update the secret\u2019s configuration. Leave the value field empty to keep the current value."
                     : type === "anthropic"
-                      ? "Your token or key is encrypted and injected into requests to api.anthropic.com."
+                      ? fromKeeperSecurity
+                        ? "The key is fetched from Keeper when a request is made and injected into requests to api.anthropic.com."
+                        : "Your token or key is encrypted and injected into requests to api.anthropic.com."
                       : `Inject credentials into requests to ${openaiMode === "codex" ? "chatgpt.com" : "api.openai.com"}.`}
               </DialogDescription>
               {isGeneric && !isEdit && !prefill && (
@@ -538,7 +589,7 @@ export const SecretDialog = ({
             </DialogHeader>
 
             <div className="min-h-0 space-y-4 overflow-y-auto py-2">
-              {type === "openai" && !isEdit && !fromOnePassword && (
+              {type === "openai" && !isEdit && !fromVault && (
                 <div className="space-y-2">
                   <div
                     className="flex w-full items-center gap-1 rounded-lg border p-1"
@@ -695,7 +746,7 @@ export const SecretDialog = ({
                   ) : (
                     "Secret value"
                   )}{" "}
-                  {isEdit && !isOAuthMode && !fromOnePassword && (
+                  {isEdit && !isOAuthMode && !fromVault && (
                     <span className="text-muted-foreground font-normal">
                       (leave empty to keep current)
                     </span>
@@ -715,6 +766,12 @@ export const SecretDialog = ({
                     display={opSelection.opDisplay}
                     onChange={() => setPickerOpen(true)}
                     onClear={() => setOpSelection(null)}
+                  />
+                ) : fromKeeperSecurity ? (
+                  <KeeperSecurityReferenceField
+                    value={keepersecurityRef ?? ""}
+                    onChange={setKeeperSecurityRef}
+                    onClear={() => setKeeperSecurityRef(null)}
                   />
                 ) : isOAuthMode ? (
                   <>
@@ -794,6 +851,17 @@ export const SecretDialog = ({
                       {opConnected && (
                         <OnePasswordPickerButton
                           onClick={() => setPickerOpen(true)}
+                        />
+                      )}
+                      {keepersecurityConnected && (
+                        <KeeperSecurityReferenceButton
+                          onClick={() => {
+                            setKeeperSecurityRef("");
+                            if (type === "openai") {
+                              setOpenaiMode("api-key");
+                              setHostPattern("api.openai.com");
+                            }
+                          }}
                         />
                       )}
                     </div>
@@ -1126,3 +1194,88 @@ const OnePasswordSelectedField = ({
     </div>
   </div>
 );
+
+/** Trailing button on the value input that switches to a Keeper reference. */
+const KeeperSecurityReferenceButton = ({
+  onClick,
+}: {
+  onClick: () => void;
+}) => (
+  <TooltipProvider delayDuration={200}>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          onClick={onClick}
+          aria-label="Use a Keeper reference"
+          className="size-9 shrink-0 transition-colors hover:border-[#FFC700]/60 hover:bg-[#FFC700]/10"
+        >
+          <Image
+            src="/icons/keeper-security.png"
+            alt=""
+            width={20}
+            height={20}
+          />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Use a Keeper reference</TooltipContent>
+    </Tooltip>
+  </TooltipProvider>
+);
+
+/** Reference input shown in place of the secret value once Keeper is chosen. */
+const KeeperSecurityReferenceField = ({
+  value,
+  onChange,
+  onClear,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onClear: () => void;
+}) => {
+  const invalid = value.trim() !== "" && !isKeeperSecurityRef(value.trim());
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Image
+          src="/icons/keeper-security.png"
+          alt="Keeper Security logo"
+          width={24}
+          height={24}
+          className="shrink-0"
+        />
+        <Input
+          id="secret-value"
+          autoFocus
+          spellCheck={false}
+          placeholder="keeper://<record-uid>/field/password"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-invalid={invalid}
+          className="font-mono text-xs"
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0"
+          onClick={onClear}
+          aria-label="Remove Keeper reference"
+        >
+          <X className="size-3.5" />
+        </Button>
+      </div>
+      <p
+        className={
+          invalid ? "text-destructive text-xs" : "text-muted-foreground text-xs"
+        }
+      >
+        {invalid
+          ? "Use keeper://<record-uid>/field/<name>, e.g. field/password"
+          : "Resolved from Keeper at request time. Nothing is stored here."}
+      </p>
+    </div>
+  );
+};
