@@ -86,9 +86,13 @@ Setup:
 
 1. In Keeper, create a Secrets Manager application dedicated to OneCLI, share the records it should read (read-only), and generate a one-time access token.
 2. **Connections** > **External Vaults** > **Keeper**, paste the one-time token (or an existing Secrets Manager configuration) and connect. A one-time token is single-use: OneCLI binds it to a reusable configuration, stores only that configuration (encrypted), and discards the token.
-3. Create a secret (**Custom** or **LLMs** tab), click the Keeper button next to the value field and enter the reference. Attach the secret to an agent as for any other secret.
+3. Create a secret (**Custom** or **LLMs** tab), click the Keeper button next to the value field, then pick a record and a field (or choose **Enter a reference manually**). Attach the secret to an agent as for any other secret. To point an existing secret at a different field, edit it and click **Change**.
 
-References use Keeper's [notation](https://docs.keeper.io/en/keeperpam/secrets-manager/about/keeper-notation): `keeper://<record-uid>/field/password` reads a standard field, `keeper://<record-uid>/custom_field/<label>` a custom one. There is no record picker; copy the record UID from Keeper. A record title also works in Keeper's notation, but titles are not unique, so prefer the UID. OneCLI accepts the `field`, `custom_field` and `file` forms (a record, a selector and a name); Keeper's two-part short forms (`/title`, `/notes`, `/type`) are not accepted. The record must be shared with the Secrets Manager application.
+References use Keeper's [notation](https://docs.keeper.io/en/keeperpam/secrets-manager/about/keeper-notation): `keeper://<record-uid>/field/password` reads a standard field, `keeper://<record-uid>/custom_field/<label>` a custom one.
+
+The picker (backed by `GET /v1/vault/keepersecurity/records` and `GET /v1/vault/keepersecurity/records/{recordUid}/fields`) lists the records shared with the Secrets Manager application, with their folder path, and builds the reference for you. Only titles, labels and references leave the API; field values never do. The reference always uses the record UID (titles are not unique), and the picked record and field names are saved with the secret for display. Keeper matches `field/<x>` against a field's type _or_ its label and fails when more than one field matches, so the picker addresses each field by a selector that is unique in its record (the label, else the type) and leaves out a field that has none (for example, two unlabeled `text` fields). Fields with object values, such as `keyPair` or `host`, are offered per property (`field/keyPair[0][privateKey]`). File, record-reference and one-time-code fields are not offered, nor are fields with no value.
+
+When typing a reference by hand, copy the record UID from Keeper. A record title also works in Keeper's notation, but prefer the UID. OneCLI accepts the `field`, `custom_field` and `file` forms (a record, a selector and a name); Keeper's two-part short forms (`/title`, `/notes`, `/type`) are not accepted. The record must be shared with the Secrets Manager application.
 
 Pairing and status are served on the provider-generic routes (`/v1/vault/keepersecurity/{pair,status}`); `pair` takes either `{ "one_time_token": "US:..." }` or `{ "ksm_config": "<base64 or JSON>" }`.
 
@@ -113,13 +117,13 @@ Agent   ──► Gateway CONNECT host:443            (credential injection)
 
 Key files:
 
-| File                          | Role                                                        |
-| ----------------------------- | ----------------------------------------------------------- |
-| `vault/mod.rs`                | `VaultProvider` trait + `VaultService` orchestrator         |
-| `vault/bitwarden.rs`          | Bitwarden provider (sessions, pairing, caching)             |
-| `vault/bitwarden_db.rs`       | DB-backed identity + session storage                        |
-| `vault/onepassword.rs`        | 1Password provider (Service Account session, `op://` cache) |
-| `vault/onepassword_api.rs`    | Bridge to the Node 1Password SDK service                    |
-| `vault/keepersecurity.rs`     | Keeper provider (KSM config session, `keeper://` cache)     |
-| `vault/keepersecurity_api.rs` | Bridge to the Node Keeper Secrets Manager SDK service       |
-| `vault/api.rs`                | REST endpoints for pair/status/disconnect + the 1P picker   |
+| File                          | Role                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `vault/mod.rs`                | `VaultProvider` trait + `VaultService` orchestrator                      |
+| `vault/bitwarden.rs`          | Bitwarden provider (sessions, pairing, caching)                          |
+| `vault/bitwarden_db.rs`       | DB-backed identity + session storage                                     |
+| `vault/onepassword.rs`        | 1Password provider (Service Account session, `op://` cache)              |
+| `vault/onepassword_api.rs`    | Bridge to the Node 1Password SDK service                                 |
+| `vault/keepersecurity.rs`     | Keeper provider (KSM config session, `keeper://` cache)                  |
+| `vault/keepersecurity_api.rs` | Bridge to the Node Keeper Secrets Manager SDK service (resolve + picker) |
+| `vault/api.rs`                | REST endpoints for pair/status/disconnect + the 1P picker                |

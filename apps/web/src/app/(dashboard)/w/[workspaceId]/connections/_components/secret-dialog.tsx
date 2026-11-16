@@ -55,6 +55,8 @@ import {
 } from "./onepassword-picker-dialog";
 import { useOnePasswordReady } from "@/hooks/use-onepassword-picker";
 import { useKeeperSecurityReady } from "@/hooks/use-keepersecurity";
+import type { KeeperSecurityDisplay } from "@/lib/api/keepersecurity";
+import { KeeperSecurityPickerDialog } from "./keepersecurity-picker-dialog";
 import { validateDisplayName } from "@onecli/api/validations/display-name";
 import {
   DEFAULT_GENERIC_INJECTION,
@@ -176,6 +178,27 @@ const isKeeperSecurityRef = (v: string): boolean =>
   v.startsWith("keeper://") &&
   v.slice(9).split("/").filter(Boolean).length >= 3;
 
+/** The labels the Keeper picker saved for an existing secret, if any. */
+const readKeeperSecurityDisplay = (
+  metadata: Record<string, unknown> | null,
+): KeeperSecurityDisplay | null => {
+  const d = metadata?.keepersecurityDisplay as
+    | Partial<KeeperSecurityDisplay>
+    | undefined;
+  if (!d?.record || !d?.field) return null;
+  return {
+    record: d.record,
+    field: d.field,
+    ...(d.folder ? { folder: d.folder } : {}),
+  };
+};
+
+/** Fallback labels from the reference's own parts (a typed reference has none). */
+const keeperSecurityDisplayFromRef = (ref: string): KeeperSecurityDisplay => {
+  const [record = "", ...rest] = ref.replace("keeper://", "").split("/");
+  return { record, field: rest.join("/") };
+};
+
 /** Recover readable picker titles for an existing 1Password-sourced secret. */
 const readOpDisplay = (
   metadata: Record<string, unknown> | null,
@@ -261,6 +284,14 @@ export const SecretDialog = ({
   const [keepersecurityRef, setKeeperSecurityRef] = useState<string | null>(
     null,
   );
+  // Labels for a reference chosen in the picker (saved for display); `null`
+  // for a hand-typed one.
+  const [keepersecurityDisplay, setKeeperSecurityDisplay] =
+    useState<KeeperSecurityDisplay | null>(null);
+  // Typing the reference by hand instead of showing the picked field.
+  const [keepersecurityManual, setKeeperSecurityManual] = useState(false);
+  const [keepersecurityPickerOpen, setKeeperSecurityPickerOpen] =
+    useState(false);
 
   // Only poll 1Password connectivity while the dialog is open; deduped across
   // every mounted SecretDialog via the shared query key.
@@ -307,6 +338,9 @@ export const SecretDialog = ({
       setOpenaiMode("api-key");
       setOpSelection(null);
       setKeeperSecurityRef(null);
+      setKeeperSecurityDisplay(null);
+      setKeeperSecurityManual(false);
+      setKeeperSecurityPickerOpen(false);
       setPickerOpen(false);
       // Custom-connection injection resets here; only the edit and prefill
       // branches below repopulate it.
@@ -329,6 +363,7 @@ export const SecretDialog = ({
           secret.keepersecurityRef
         ) {
           setKeeperSecurityRef(secret.keepersecurityRef);
+          setKeeperSecurityDisplay(readKeeperSecurityDisplay(secret.metadata));
         }
         setName(secret.name);
         setValue("");
@@ -408,6 +443,20 @@ export const SecretDialog = ({
   const effectivePathPattern =
     isGeneric && (pathLimitHidden || !pathLimitOpen) ? "" : pathPattern;
 
+  const clearKeeperSecurity = () => {
+    setKeeperSecurityRef(null);
+    setKeeperSecurityDisplay(null);
+    setKeeperSecurityManual(false);
+  };
+
+  // A Keeper value is always a raw API key: an OpenAI secret leaves OAuth mode.
+  const applyKeeperSecurityToOpenai = () => {
+    if (type === "openai") {
+      setOpenaiMode("api-key");
+      setHostPattern("api.openai.com");
+    }
+  };
+
   const handleSave = async () => {
     if (!isValid) return;
     setSaving(true);
@@ -434,6 +483,9 @@ export const SecretDialog = ({
               ? {
                   valueSource: "keepersecurity" as const,
                   keepersecurityRef: (keepersecurityRef ?? "").trim(),
+                  ...(keepersecurityDisplay && !keepersecurityManual
+                    ? { keepersecurityDisplay }
+                    : {}),
                 }
               : value.trim()
                 ? { valueSource: "inline" as const, value: value.trim() }
@@ -462,6 +514,9 @@ export const SecretDialog = ({
                   type,
                   valueSource: "keepersecurity",
                   keepersecurityRef: (keepersecurityRef ?? "").trim(),
+                  ...(keepersecurityDisplay && !keepersecurityManual
+                    ? { keepersecurityDisplay }
+                    : {}),
                   hostPattern,
                   pathPattern: effectivePathPattern || undefined,
                   injectionConfig: buildInjectionConfig() ?? null,
@@ -767,11 +822,20 @@ export const SecretDialog = ({
                     onChange={() => setPickerOpen(true)}
                     onClear={() => setOpSelection(null)}
                   />
+                ) : fromKeeperSecurity && !keepersecurityManual ? (
+                  <KeeperSecuritySelectedField
+                    display={
+                      keepersecurityDisplay ??
+                      keeperSecurityDisplayFromRef(keepersecurityRef)
+                    }
+                    onChange={() => setKeeperSecurityPickerOpen(true)}
+                    onClear={clearKeeperSecurity}
+                  />
                 ) : fromKeeperSecurity ? (
                   <KeeperSecurityReferenceField
                     value={keepersecurityRef ?? ""}
                     onChange={setKeeperSecurityRef}
-                    onClear={() => setKeeperSecurityRef(null)}
+                    onClear={clearKeeperSecurity}
                   />
                 ) : isOAuthMode ? (
                   <>
@@ -855,13 +919,7 @@ export const SecretDialog = ({
                       )}
                       {keepersecurityConnected && (
                         <KeeperSecurityReferenceButton
-                          onClick={() => {
-                            setKeeperSecurityRef("");
-                            if (type === "openai") {
-                              setOpenaiMode("api-key");
-                              setHostPattern("api.openai.com");
-                            }
-                          }}
+                          onClick={() => setKeeperSecurityPickerOpen(true)}
                         />
                       )}
                     </div>
@@ -931,6 +989,26 @@ export const SecretDialog = ({
                     setOpenaiMode("api-key");
                     setHostPattern("api.openai.com");
                   }
+                }}
+              />
+
+              <KeeperSecurityPickerDialog
+                open={keepersecurityPickerOpen}
+                onOpenChange={setKeeperSecurityPickerOpen}
+                onSelect={(selection) => {
+                  setKeeperSecurityRef(selection.ref);
+                  setKeeperSecurityDisplay(selection.display);
+                  setKeeperSecurityManual(false);
+                  setKeeperSecurityPickerOpen(false);
+                  applyKeeperSecurityToOpenai();
+                }}
+                onEnterManually={() => {
+                  // Keep the current reference so it can be tweaked by hand.
+                  setKeeperSecurityRef((prev) => prev ?? "");
+                  setKeeperSecurityDisplay(null);
+                  setKeeperSecurityManual(true);
+                  setKeeperSecurityPickerOpen(false);
+                  applyKeeperSecurityToOpenai();
                 }}
               />
 
@@ -1195,7 +1273,7 @@ const OnePasswordSelectedField = ({
   </div>
 );
 
-/** Trailing button on the value input that switches to a Keeper reference. */
+/** Trailing button on the value input that opens the Keeper field picker. */
 const KeeperSecurityReferenceButton = ({
   onClick,
 }: {
@@ -1209,7 +1287,7 @@ const KeeperSecurityReferenceButton = ({
           variant="outline"
           size="icon"
           onClick={onClick}
-          aria-label="Use a Keeper reference"
+          aria-label="Use a Keeper field"
           className="size-9 shrink-0 transition-colors hover:border-[#FFC700]/60 hover:bg-[#FFC700]/10"
         >
           <Image
@@ -1220,12 +1298,63 @@ const KeeperSecurityReferenceButton = ({
           />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>Use a Keeper reference</TooltipContent>
+      <TooltipContent>Use a Keeper field</TooltipContent>
     </Tooltip>
   </TooltipProvider>
 );
 
-/** Reference input shown in place of the secret value once Keeper is chosen. */
+/** Read-only summary shown in place of the input once a Keeper field is chosen. */
+const KeeperSecuritySelectedField = ({
+  display,
+  onChange,
+  onClear,
+}: {
+  display: KeeperSecurityDisplay;
+  onChange: () => void;
+  onClear: () => void;
+}) => (
+  <div className="bg-muted/30 flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+    <div className="flex min-w-0 items-center gap-2.5">
+      <Image
+        src="/icons/keeper-security.png"
+        alt="Keeper Security logo"
+        width={30}
+        height={30}
+        className="shrink-0"
+      />
+      <div className="min-w-0 leading-tight">
+        <div className="truncate text-sm font-medium">{display.field}</div>
+        <div className="text-muted-foreground truncate font-mono text-xs">
+          {display.folder ? `${display.folder} / ` : ""}
+          {display.record}
+        </div>
+      </div>
+    </div>
+    <div className="flex shrink-0 items-center gap-0.5">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 px-2 text-xs"
+        onClick={onChange}
+      >
+        Change
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        onClick={onClear}
+        aria-label="Remove Keeper reference"
+      >
+        <X className="size-3.5" />
+      </Button>
+    </div>
+  </div>
+);
+
+/** Hand-typed reference input (the picker's "Enter a reference manually"). */
 const KeeperSecurityReferenceField = ({
   value,
   onChange,

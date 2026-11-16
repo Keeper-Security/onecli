@@ -136,10 +136,16 @@ const buildOnePasswordMetadata = (
 // Keeper has no display labels; LLM keys resolved from Keeper are API-key mode.
 const buildKeeperSecurityMetadata = (
   type: string,
-): Prisma.InputJsonValue | typeof Prisma.JsonNull =>
-  type === "anthropic" || type === "openai"
-    ? ({ authMode: "api-key" } as Prisma.InputJsonValue)
+  display: CreateSecretInput["keepersecurityDisplay"],
+): Prisma.InputJsonValue | typeof Prisma.JsonNull => {
+  const meta: Record<string, unknown> = {};
+  // LLM keys resolved from Keeper are always API-key mode, as with 1Password.
+  if (type === "anthropic" || type === "openai") meta.authMode = "api-key";
+  if (display) meta.keepersecurityDisplay = display;
+  return Object.keys(meta).length > 0
+    ? (meta as Prisma.InputJsonValue)
     : Prisma.JsonNull;
+};
 
 export type { CreateSecretInput, UpdateSecretInput };
 
@@ -440,7 +446,10 @@ export const createSecret = async (
         hostPattern,
         pathPattern,
         injectionConfig,
-        metadata: buildKeeperSecurityMetadata(input.type),
+        metadata: buildKeeperSecurityMetadata(
+          input.type,
+          input.keepersecurityDisplay,
+        ),
         ...scopeCreate(scope),
       },
       select: {
@@ -572,7 +581,10 @@ export const updateSecret = async (
     data.opRef = null;
     if (secret.type === "anthropic") data.hostPattern = "api.anthropic.com";
     if (secret.type === "openai") data.hostPattern = "api.openai.com";
-    data.metadata = buildKeeperSecurityMetadata(secret.type);
+    data.metadata = buildKeeperSecurityMetadata(
+      secret.type,
+      input.keepersecurityDisplay,
+    );
   } else if (input.value !== undefined) {
     let value = input.value.trim();
     if (!value)

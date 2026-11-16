@@ -1,8 +1,9 @@
 //! Internal HTTP client for the Node "Keeper KSM SDK service".
 //!
 //! The gateway holds the (decrypted) Keeper KSM config and delegates the actual
-//! SDK work — validating a config and resolving a `keeper://` reference — to
-//! the Node API over an authenticated, internal channel.
+//! SDK work — validating a config, resolving a `keeper://` reference, and
+//! listing records/fields for the dashboard picker — to the Node API over an
+//! authenticated, internal channel.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -133,6 +134,39 @@ pub async fn resolve(
         .await
         .map_err(|e| KeeperSecurityError::Transient(format!("invalid resolve response: {e}")))?;
     Ok(body.value)
+}
+
+/// List the records shared with the KSM application (picker step 1).
+pub async fn list_records(config: &str) -> Result<serde_json::Value, KeeperSecurityError> {
+    list("list-records", &serde_json::json!({ "config": config })).await
+}
+
+/// List a record's referenceable fields — labels and refs, never values
+/// (picker step 2).
+pub async fn list_fields(
+    config: &str,
+    record_uid: &str,
+) -> Result<serde_json::Value, KeeperSecurityError> {
+    list(
+        "list-fields",
+        &serde_json::json!({ "config": config, "recordUid": record_uid }),
+    )
+    .await
+}
+
+/// Shared body for the picker passthroughs: POST and return the raw JSON the
+/// Node service produced (labels/refs only), or a classified error.
+async fn list(
+    op: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, KeeperSecurityError> {
+    let resp = send(op, body).await?;
+    if !resp.status().is_success() {
+        return Err(classify(resp).await);
+    }
+    resp.json()
+        .await
+        .map_err(|e| KeeperSecurityError::Transient(format!("invalid {op} response: {e}")))
 }
 
 async fn send(

@@ -280,6 +280,16 @@ const keepersecurityRefSchema = z
     },
   );
 
+// Human-readable labels of the picked Keeper record/field, for display only
+// (the reference itself holds only the record UID).
+const keepersecurityDisplaySchema = z
+  .object({
+    record: z.string().max(500),
+    field: z.string().max(500),
+    folder: z.string().max(1000).optional(),
+  })
+  .optional();
+
 // Human-readable labels of the picked vault/item/field, for display only.
 const opDisplaySchema = z
   .object({ vault: z.string(), item: z.string(), field: z.string() })
@@ -293,6 +303,7 @@ export const createSecretSchema = z
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
     keepersecurityRef: keepersecurityRefSchema.optional(),
+    keepersecurityDisplay: keepersecurityDisplaySchema,
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema,
     pathPattern: z.string().max(1000).optional(),
@@ -333,6 +344,7 @@ export const updateSecretSchema = z
     value: z.string().max(10000).optional(),
     opRef: opRefSchema.optional(),
     keepersecurityRef: keepersecurityRefSchema.optional(),
+    keepersecurityDisplay: keepersecurityDisplaySchema,
     opDisplay: opDisplaySchema,
     hostPattern: hostPatternSchema.optional(),
     pathPattern: z.string().max(1000).nullable().optional(),

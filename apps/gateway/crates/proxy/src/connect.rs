@@ -739,7 +739,7 @@ pub trait PolicyEngineExt {
     ) -> Result<SecretInjections, ConnectError>;
 
     /// Produce a secret's plaintext value from its source — the encrypted column
-    /// (inline) or a live 1Password reference. Returns `None` (after logging) when
+    /// (inline) or a live 1Password / Keeper reference. Returns `None` (after logging) when
     /// the value can't be produced, so the caller skips the secret exactly as it
     /// always has on a decrypt failure.
     async fn resolve_secret_value(
@@ -1079,8 +1079,8 @@ impl PolicyEngineExt for PolicyEngine {
         let mut rules = Vec::with_capacity(injectable.len());
         let mut unavailable = None;
         for secret in injectable {
-            // Resolve the value from its source (inline column or live 1Password
-            // reference); a failure skips the secret, exactly as a decrypt
+            // Resolve the value from its source (inline column, or a live
+            // 1Password / Keeper reference); a failure skips the secret, exactly as a decrypt
             // failure always has, and is remembered so an upstream auth failure
             // is answered with the truth (a granted credential that could not
             // be read) instead of "this agent has no access".
@@ -1090,7 +1090,7 @@ impl PolicyEngineExt for PolicyEngine {
             };
 
             // OAuth token refresh applies only to inline OpenAI secrets; a
-            // 1Password-sourced value is always a raw API key (api-key metadata).
+            // 1Password- or Keeper-sourced value is always a raw API key (api-key metadata).
             let is_openai_oauth = secret.value_source != "onepassword"
                 && secret.value_source != "keepersecurity"
                 && secret.type_ == "openai"
@@ -1173,7 +1173,7 @@ impl PolicyEngineExt for PolicyEngine {
         })
     }
     /// Produce a secret's plaintext value from its source — the encrypted column
-    /// (inline) or a live 1Password reference. Returns `None` (after logging) when
+    /// (inline) or a live 1Password / Keeper reference. Returns `None` (after logging) when
     /// the value can't be produced, so the caller skips the secret exactly as it
     /// always has on a decrypt failure.
     async fn resolve_secret_value(

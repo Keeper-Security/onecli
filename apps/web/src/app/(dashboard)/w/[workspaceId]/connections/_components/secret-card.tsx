@@ -94,6 +94,12 @@ export const SecretCard = ({
           | { vault: string; item: string; field: string }
           | undefined)
       : undefined;
+  const keepersecurityDisplay =
+    secret.valueSource === "keepersecurity"
+      ? (secret.metadata?.keepersecurityDisplay as
+          | { record: string; field: string; folder?: string }
+          | undefined)
+      : undefined;
 
   return (
     <>
@@ -153,8 +159,20 @@ export const SecretCard = ({
                 secret.keepersecurityRef && (
                   <span className="text-muted-foreground">
                     Value:{" "}
-                    <code className="bg-muted rounded px-1 py-0.5 font-mono">
-                      {secret.keepersecurityRef}
+                    <code
+                      className="bg-muted rounded px-1 py-0.5 font-mono"
+                      title={secret.keepersecurityRef}
+                    >
+                      {keepersecurityDisplay?.record &&
+                      keepersecurityDisplay?.field
+                        ? [
+                            keepersecurityDisplay.folder,
+                            keepersecurityDisplay.record,
+                            keepersecurityDisplay.field,
+                          ]
+                            .filter(Boolean)
+                            .join(" › ")
+                        : secret.keepersecurityRef}
                     </code>
                   </span>
                 )}

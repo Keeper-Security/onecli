@@ -7,10 +7,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FOCUS_HANDOFF_MS, SecretDialog } from "./secret-dialog";
 import type { SecretActions } from "./types";
 
-// The Keeper mode of the secret dialog: a reference in place of a pasted value.
-// The unit here is what the dialog offers and what it hands to the save
-// actions. The server graph stays out (see secret-dialog.test.tsx).
+// The Keeper mode of the secret dialog: a reference in place of a pasted value,
+// chosen in the record/field picker or typed by hand. The unit here is what the
+// dialog offers and what it hands to the save actions. The picker itself is
+// stubbed to its two outcomes (keepersecurity-picker-dialog.test.tsx covers
+// it), and the server graph stays out (see secret-dialog.test.tsx).
 const keepersecurity = vi.hoisted(() => ({ ready: true }));
+
+const PICKED = vi.hoisted(() => ({
+  ref: "keeper://qnXEdBFVi2Gm1UFehAsjew/custom_field/API Key",
+  display: { record: "GitHub", field: "API Key", folder: "Shared / Dev" },
+}));
 
 vi.mock("@/lib/actions/secrets", () => ({ updateSecret: vi.fn() }));
 vi.mock("@/hooks/use-keepersecurity", () => ({
@@ -21,6 +28,27 @@ vi.mock("@/hooks/use-onepassword-picker", () => ({
 }));
 vi.mock("./onepassword-picker-dialog", () => ({
   OnePasswordPickerDialog: () => null,
+}));
+vi.mock("./keepersecurity-picker-dialog", () => ({
+  KeeperSecurityPickerDialog: ({
+    open,
+    onSelect,
+    onEnterManually,
+  }: {
+    open: boolean;
+    onSelect: (s: typeof PICKED) => void;
+    onEnterManually: () => void;
+  }) =>
+    open ? (
+      <div data-testid="keeper-picker">
+        <button type="button" onClick={() => onSelect(PICKED)}>
+          pick field
+        </button>
+        <button type="button" onClick={onEnterManually}>
+          enter manually
+        </button>
+      </div>
+    ) : null,
 }));
 vi.mock("@/hooks/use-invalidate-cache", () => ({
   useInvalidateGatewayCache: () => vi.fn(),
@@ -81,9 +109,18 @@ const pasteInto = async (placeholder: string, text: string) => {
 };
 
 const keepersecurityButton = () =>
-  screen.queryByRole("button", { name: "Use a Keeper reference" });
-const useKeeperSecurity = () =>
-  userEvent.click(keepersecurityButton() as HTMLElement);
+  screen.queryByRole("button", { name: "Use a Keeper field" });
+const openPicker = () => userEvent.click(keepersecurityButton() as HTMLElement);
+/** Keeper button → picker → a field. */
+const pickField = async () => {
+  await openPicker();
+  await userEvent.click(screen.getByRole("button", { name: "pick field" }));
+};
+/** Keeper button → picker → "Enter a reference manually". */
+const useKeeperSecurity = async () => {
+  await openPicker();
+  await userEvent.click(screen.getByRole("button", { name: "enter manually" }));
+};
 const addConnection = () =>
   screen.getByRole("button", { name: "Add connection" });
 
@@ -128,7 +165,98 @@ describe("SecretDialog: Keeper reference mode", () => {
     });
   });
 
-  describe("switching the value field", () => {
+  describe("picking a field", () => {
+    it("opens the picker from the Keeper button", async () => {
+      await renderDialog({ defaultType: "generic" });
+      expect(screen.queryByTestId("keeper-picker")).not.toBeInTheDocument();
+      await openPicker();
+      expect(screen.getByTestId("keeper-picker")).toBeInTheDocument();
+    });
+
+    it("shows the picked field by name instead of an input", async () => {
+      await renderDialog({ defaultType: "generic" });
+      await pickField();
+      expect(screen.queryByTestId("keeper-picker")).not.toBeInTheDocument();
+      expect(screen.getByText("API Key")).toBeInTheDocument();
+      expect(screen.getByText("Shared / Dev / GitHub")).toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(VALUE_PLACEHOLDER),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText(REF_PLACEHOLDER),
+      ).not.toBeInTheDocument();
+    });
+
+    it("saves the picked reference with its labels", async () => {
+      const createSecret = createSpy();
+      await renderDialog({
+        defaultType: "generic",
+        secretActions: actions({ createSecret }),
+      });
+      await fillNameAndHost();
+      await pickField();
+      await userEvent.click(addConnection());
+
+      await waitFor(() => expect(createSecret).toHaveBeenCalledTimes(1));
+      const payload = createSecret.mock.calls[0]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(payload).toMatchObject({
+        valueSource: "keepersecurity",
+        keepersecurityRef: PICKED.ref,
+        keepersecurityDisplay: PICKED.display,
+      });
+      expect(payload).not.toHaveProperty("value");
+    });
+
+    it("re-opens the picker from Change", async () => {
+      await renderDialog({ defaultType: "generic" });
+      await pickField();
+      await userEvent.click(screen.getByRole("button", { name: "Change" }));
+      expect(screen.getByTestId("keeper-picker")).toBeInTheDocument();
+    });
+
+    it("lets you back out of a picked field to a pasted value", async () => {
+      await renderDialog({ defaultType: "generic" });
+      await pickField();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Remove Keeper reference" }),
+      );
+      expect(
+        screen.getByPlaceholderText(VALUE_PLACEHOLDER),
+      ).toBeInTheDocument();
+    });
+
+    it("does not save picker labels for a hand-typed reference", async () => {
+      const createSecret = createSpy();
+      await renderDialog({
+        defaultType: "generic",
+        secretActions: actions({ createSecret }),
+      });
+      await fillNameAndHost();
+      await pickField();
+      // Change → type it by hand: the picked reference carries over to edit.
+      await userEvent.click(screen.getByRole("button", { name: "Change" }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "enter manually" }),
+      );
+      expect(screen.getByPlaceholderText(REF_PLACEHOLDER)).toHaveValue(
+        PICKED.ref,
+      );
+      await userEvent.click(addConnection());
+
+      await waitFor(() => expect(createSecret).toHaveBeenCalledTimes(1));
+      const payload = createSecret.mock.calls[0]?.[0] as Record<
+        string,
+        unknown
+      >;
+      expect(payload).toMatchObject({ keepersecurityRef: PICKED.ref });
+      expect(payload).not.toHaveProperty("keepersecurityDisplay");
+    });
+  });
+
+  describe("typing a reference by hand", () => {
     it("swaps the pasted value for a reference field", async () => {
       await renderDialog({ defaultType: "generic" });
       expect(
@@ -302,21 +430,88 @@ describe("SecretDialog: Keeper reference mode", () => {
   });
 
   describe("edit", () => {
-    it("opens an existing Keeper secret on its reference", async () => {
-      await renderDialog({ secret: keepersecuritySecret });
-      expect(screen.getByPlaceholderText(REF_PLACEHOLDER)).toHaveValue(REF);
+    const pickedSecret = {
+      ...keepersecuritySecret,
+      metadata: {
+        keepersecurityDisplay: {
+          record: "GitHub",
+          field: "Password",
+          folder: "Shared",
+        },
+      },
+    };
+
+    it("opens a picked Keeper secret on its field's name", async () => {
+      await renderDialog({ secret: pickedSecret });
+      expect(screen.getByText("Password")).toBeInTheDocument();
+      expect(screen.getByText("Shared / GitHub")).toBeInTheDocument();
       expect(
         screen.queryByPlaceholderText(VALUE_PLACEHOLDER),
       ).not.toBeInTheDocument();
     });
 
-    it("saves a changed reference, still as a Keeper secret", async () => {
+    it("falls back to the reference's parts when it was typed by hand", async () => {
+      await renderDialog({ secret: keepersecuritySecret });
+      expect(screen.getByText("field/password")).toBeInTheDocument();
+      expect(screen.getByText("qnXEdBFVi2Gm1UFehAsjew")).toBeInTheDocument();
+    });
+
+    it("keeps the saved labels when only the host changes", async () => {
+      const updateSecret = updateSpy();
+      await renderDialog({
+        secret: pickedSecret,
+        secretActions: actions({ updateSecret }),
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Save changes" }),
+      );
+      await waitFor(() => expect(updateSecret).toHaveBeenCalledTimes(1));
+      expect(updateSecret.mock.calls[0]?.[1]).toMatchObject({
+        valueSource: "keepersecurity",
+        keepersecurityRef: REF,
+        keepersecurityDisplay: pickedSecret.metadata.keepersecurityDisplay,
+      });
+    });
+
+    it("points an existing secret at a different field via Change", async () => {
+      const updateSecret = updateSpy();
+      await renderDialog({
+        secret: pickedSecret,
+        secretActions: actions({ updateSecret }),
+      });
+      await userEvent.click(screen.getByRole("button", { name: "Change" }));
+      await userEvent.click(screen.getByRole("button", { name: "pick field" }));
+      expect(screen.getByText("API Key")).toBeInTheDocument();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Save changes" }),
+      );
+
+      await waitFor(() => expect(updateSecret).toHaveBeenCalledTimes(1));
+      const [id, payload] = updateSecret.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(id).toBe("s1");
+      expect(payload).toMatchObject({
+        valueSource: "keepersecurity",
+        keepersecurityRef: PICKED.ref,
+        keepersecurityDisplay: PICKED.display,
+      });
+      expect(payload).not.toHaveProperty("value");
+    });
+
+    it("saves a hand-edited reference, still as a Keeper secret", async () => {
       const updateSecret = updateSpy();
       await renderDialog({
         secret: keepersecuritySecret,
         secretActions: actions({ updateSecret }),
       });
+      await userEvent.click(screen.getByRole("button", { name: "Change" }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "enter manually" }),
+      );
       const field = screen.getByPlaceholderText(REF_PLACEHOLDER);
+      expect(field).toHaveValue(REF);
       await userEvent.clear(field);
       await userEvent.click(field);
       await userEvent.paste("keeper://AAAAAAAAAAAAAAAAAAAAAA/field/login");
@@ -339,6 +534,10 @@ describe("SecretDialog: Keeper reference mode", () => {
 
     it("blocks saving an edit that empties the reference", async () => {
       await renderDialog({ secret: keepersecuritySecret });
+      await userEvent.click(screen.getByRole("button", { name: "Change" }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "enter manually" }),
+      );
       await userEvent.clear(screen.getByPlaceholderText(REF_PLACEHOLDER));
       expect(
         screen.getByRole("button", { name: "Save changes" }),
@@ -381,6 +580,9 @@ describe("SecretDialog: Keeper reference mode", () => {
       });
       expect(
         screen.queryByPlaceholderText(REF_PLACEHOLDER),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Change" }),
       ).not.toBeInTheDocument();
     });
   });

@@ -1,5 +1,5 @@
 /**
- * Internal endpoints the gateway calls to delegate 1Password SDK work.
+ * Internal endpoints the gateway calls to delegate 1Password and Keeper SDK work.
  * Guarded by the shared-secret middleware (not user auth). Served at
  * `/v1/internal/*`. Errors propagate to the root app's error handler.
  */
@@ -10,6 +10,8 @@ import { internalAuth } from "../middleware/internal-auth";
 import { ServiceError } from "../services/errors";
 import {
   bindOneTimeToken as keepersecurityBindOneTimeToken,
+  getRecordFields as keepersecurityGetRecordFields,
+  listRecords as keepersecurityListRecords,
   resolveSecret as keepersecurityResolveSecret,
   validateConfig as keepersecurityValidateConfig,
 } from "../services/keepersecurity-service";
@@ -118,6 +120,26 @@ export const internalRoutes = () => {
     );
     return c.json({
       value: await keepersecurityResolveSecret(config, keepersecurity_ref),
+    });
+  });
+
+  // ── Keeper picker: browse records → fields (values never leave Node) ──
+
+  app.post("/keepersecurity/list-records", async (c) => {
+    const { config } = parseBody(
+      keepersecurityBase,
+      await c.req.json().catch(() => ({})),
+    );
+    return c.json({ records: await keepersecurityListRecords(config) });
+  });
+
+  app.post("/keepersecurity/list-fields", async (c) => {
+    const { config, recordUid } = parseBody(
+      keepersecurityBase.extend({ recordUid: z.string().min(1) }),
+      await c.req.json().catch(() => ({})),
+    );
+    return c.json({
+      fields: await keepersecurityGetRecordFields(config, recordUid),
     });
   });
 

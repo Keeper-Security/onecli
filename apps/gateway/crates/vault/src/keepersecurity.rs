@@ -4,7 +4,7 @@
 //! `vault_connection` — plus the per-workspace session and a small resolve cache.
 //! Keeper is **not** a hostname-matched vault racer like Bitwarden; it is a
 //! *value source* for explicit secrets. A secret with `value_source =
-//! "onepassword"` carries an `keeper://<record-uid>/field/<name>` reference that the
+//! "keepersecurity"` carries an `keeper://<record-uid>/field/<name>` reference that the
 //! The `PolicyEngine` (`context`) resolves here at request time
 //! (instead of decrypting a stored `encrypted_value`).
 //!
@@ -221,7 +221,7 @@ impl KeeperSecurityVaultProvider {
         let config: KeeperSecurityConfig = serde_json::from_value(connection_data)
             .map_err(|e| VaultError::Internal(format!("malformed connection_data: {e}")))?;
 
-        let sa_token = self
+        let ksm_config = self
             .crypto
             .decrypt(&config.encrypted_ksm_config)
             .await
@@ -231,7 +231,7 @@ impl KeeperSecurityVaultProvider {
             })?;
 
         let session = Arc::new(KeeperSecuritySession {
-            decrypted_config: sa_token,
+            decrypted_config: ksm_config,
             generation: row.generation,
             ref_cache: DashMap::new(),
             last_used: Mutex::new(Instant::now()),
@@ -327,6 +327,38 @@ impl KeeperSecurityVaultProvider {
                 expires_at: Instant::now() + NEGATIVE_CACHE_TTL,
             },
         );
+    }
+
+    // ── Picker passthroughs (browse records → fields) ────────────────────
+    // The browser never sees the KSM config or field values — it gets only the
+    // titles/labels/refs the Node service returns.
+
+    pub async fn list_records(&self, workspace_id: &str) -> Result<serde_json::Value, VaultError> {
+        let session = self.picker_session(workspace_id).await?;
+        keepersecurity_api::list_records(&session.decrypted_config)
+            .await
+            .map_err(keepersecurity_err_to_vault)
+    }
+
+    pub async fn list_fields(
+        &self,
+        workspace_id: &str,
+        record_uid: &str,
+    ) -> Result<serde_json::Value, VaultError> {
+        let session = self.picker_session(workspace_id).await?;
+        keepersecurity_api::list_fields(&session.decrypted_config, record_uid)
+            .await
+            .map_err(keepersecurity_err_to_vault)
+    }
+
+    /// Load a connected session for picker calls, or 404 if not paired.
+    async fn picker_session(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Arc<KeeperSecuritySession>, VaultError> {
+        self.load_session(workspace_id)
+            .await?
+            .ok_or_else(|| VaultError::NotFound("keepersecurity is not connected".into()))
     }
 }
 
@@ -460,6 +492,14 @@ async fn live_check(session: &KeeperSecuritySession) -> bool {
                 Some(Instant::now() + ERROR_COOLDOWN);
             false
         }
+    }
+}
+
+fn keepersecurity_err_to_vault(e: KeeperSecurityError) -> VaultError {
+    match e {
+        KeeperSecurityError::NotFound(m) => VaultError::NotFound(m),
+        KeeperSecurityError::BadRequest(m) => VaultError::BadRequest(m),
+        KeeperSecurityError::Transient(m) => VaultError::Internal(m),
     }
 }
 

@@ -402,6 +402,9 @@ export const queryKeys = {
   keepersecurity: {
     all: () => ["keepersecurity", ...scope()] as const,
     status: () => [...queryKeys.keepersecurity.all(), "status"] as const,
+    records: () => [...queryKeys.keepersecurity.all(), "records"] as const,
+    fields: (recordUid: string) =>
+      [...queryKeys.keepersecurity.all(), "fields", recordUid] as const,
   },
   onepassword: {
     all: () => ["onepassword", ...scope()] as const,

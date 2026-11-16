@@ -5,10 +5,14 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
-import { getStatus } from "@/lib/api/keepersecurity";
+import { getStatus, listFields, listRecords } from "@/lib/api/keepersecurity";
 import { queryKeys } from "@/lib/api/keys";
 
 const PROVIDER = "keepersecurity";
+
+// Record contents change rarely within a dialog session; cache briefly so the
+// picker feels instant and doesn't re-hit Keeper on every reopen.
+const STALE_TIME = 60_000;
 
 /** A one-time token looks like `US:` / `EU:` followed by url-safe base64. */
 const ONE_TIME_TOKEN = /^[A-Za-z]{2,}:[\w-]+$/;
@@ -75,7 +79,25 @@ export const useKeeperSecurityReady = (enabled: boolean) => {
     queryKey: queryKeys.keepersecurity.status(),
     queryFn: getStatus,
     enabled,
-    staleTime: 60_000,
+    staleTime: STALE_TIME,
   });
   return { isReady: query.data?.connected ?? false, ...query };
 };
+
+/** Records shared with the KSM application (picker step 1). */
+export const useKeeperSecurityRecords = (enabled: boolean) =>
+  useQuery({
+    queryKey: queryKeys.keepersecurity.records(),
+    queryFn: listRecords,
+    enabled,
+    staleTime: STALE_TIME,
+  });
+
+/** A record's referenceable fields (picker step 2). */
+export const useKeeperSecurityFields = (recordUid: string | null) =>
+  useQuery({
+    queryKey: queryKeys.keepersecurity.fields(recordUid ?? ""),
+    queryFn: () => listFields(recordUid as string),
+    enabled: !!recordUid,
+    staleTime: STALE_TIME,
+  });
