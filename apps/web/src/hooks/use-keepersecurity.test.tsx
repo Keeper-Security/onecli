@@ -77,7 +77,10 @@ describe("useKeeperSecurityPair", () => {
     respond(200, { status: "paired" });
     const { result } = pairHook();
     await act(() => result.current.pair("base64_config", config));
-    expect(lastCall().body).toEqual({ ksm_config: config });
+    expect(lastCall().body).toEqual({
+      ksm_config: config,
+      ksm_config_format: "base64",
+    });
   });
 
   it("sends a JSON configuration as a config", async () => {
@@ -85,7 +88,10 @@ describe("useKeeperSecurityPair", () => {
     respond(200, { status: "paired" });
     const { result } = pairHook();
     await act(() => result.current.pair("json_config", config));
-    expect(lastCall().body).toEqual({ ksm_config: config });
+    expect(lastCall().body).toEqual({
+      ksm_config: config,
+      ksm_config_format: "json",
+    });
   });
 
   // A config that happens to look like a token is still a config when the user
@@ -94,7 +100,10 @@ describe("useKeeperSecurityPair", () => {
     respond(400, { error: "invalid keepersecurity KSM config" });
     const { result } = pairHook();
     await act(() => result.current.pair("base64_config", "US:abc123"));
-    expect(lastCall().body).toEqual({ ksm_config: "US:abc123" });
+    expect(lastCall().body).toEqual({
+      ksm_config: "US:abc123",
+      ksm_config_format: "base64",
+    });
   });
 
   it.each([

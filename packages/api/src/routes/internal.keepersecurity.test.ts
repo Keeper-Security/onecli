@@ -11,6 +11,8 @@ vi.hoisted(() => {
 });
 
 const keepersecurity = vi.hoisted(() => ({
+  KSM_CONFIG_FORMATS: ["json", "base64"] as const,
+  normalizeConfig: vi.fn(),
   bindOneTimeToken: vi.fn(),
   getRecordFields: vi.fn(),
   listRecords: vi.fn(),
@@ -130,6 +132,43 @@ describe("POST /keepersecurity/validate", () => {
       new ServiceError("BAD_REQUEST", "denied"),
     );
     expect((await post("validate", { config: "cfg" })).status).toBe(400);
+  });
+  // Pairing with a pasted config: decoded as the user said it is, validated,
+  // and handed back in the form the gateway stores.
+  it.each(["json", "base64"])(
+    "decodes a %s config as told, validates the result, and returns it",
+    async (format) => {
+      keepersecurity.normalizeConfig.mockReturnValue('{"clientId":"c"}');
+      keepersecurity.validateConfig.mockResolvedValue({ recordCount: 2 });
+      const res = await post("validate", { config: "pasted", format });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        valid: true,
+        recordCount: 2,
+        config: '{"clientId":"c"}',
+      });
+      expect(keepersecurity.normalizeConfig).toHaveBeenCalledWith(
+        "pasted",
+        format,
+      );
+      expect(keepersecurity.validateConfig).toHaveBeenCalledWith(
+        '{"clientId":"c"}',
+      );
+    },
+  );
+
+  // A status check sends the stored form: nothing to decode, nothing to echo.
+  it("does not decode or return the config without a format", async () => {
+    keepersecurity.validateConfig.mockResolvedValue({ recordCount: 1 });
+    const res = await post("validate", { config: "stored" });
+    expect(await res.json()).toEqual({ valid: true, recordCount: 1 });
+    expect(keepersecurity.normalizeConfig).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown format", async () => {
+    const res = await post("validate", { config: "c", format: "yaml" });
+    expect(res.status).toBe(400);
+    expect(keepersecurity.validateConfig).not.toHaveBeenCalled();
   });
 });
 

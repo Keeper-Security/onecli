@@ -9,9 +9,11 @@ import { z } from "zod";
 import { internalAuth } from "../middleware/internal-auth";
 import { ServiceError } from "../services/errors";
 import {
+  KSM_CONFIG_FORMATS,
   bindOneTimeToken as keepersecurityBindOneTimeToken,
   getRecordFields as keepersecurityGetRecordFields,
   listRecords as keepersecurityListRecords,
+  normalizeConfig as keepersecurityNormalizeConfig,
   resolveSecret as keepersecurityResolveSecret,
   validateConfig as keepersecurityValidateConfig,
 } from "../services/keepersecurity-service";
@@ -104,13 +106,25 @@ export const internalRoutes = () => {
     return c.json({ config: await keepersecurityBindOneTimeToken(token) });
   });
 
+  // `format` is sent only when pairing with a pasted config: the config is then
+  // decoded as the user said it is, validated, and returned in the stored form
+  // (`config`). Without it (status checks), `config` is already that form.
   app.post("/keepersecurity/validate", async (c) => {
-    const { config } = parseBody(
-      keepersecurityBase,
+    const { config, format } = parseBody(
+      keepersecurityBase.extend({
+        format: z.enum(KSM_CONFIG_FORMATS).optional(),
+      }),
       await c.req.json().catch(() => ({})),
     );
-    const health = await keepersecurityValidateConfig(config);
-    return c.json({ valid: true, ...health });
+    const stored = format
+      ? keepersecurityNormalizeConfig(config, format)
+      : config;
+    const health = await keepersecurityValidateConfig(stored);
+    return c.json({
+      valid: true,
+      ...health,
+      ...(format ? { config: stored } : {}),
+    });
   });
 
   app.post("/keepersecurity/resolve", async (c) => {

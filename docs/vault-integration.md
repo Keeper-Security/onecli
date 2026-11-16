@@ -94,7 +94,7 @@ The picker (backed by `GET /v1/vault/keepersecurity/records` and `GET /v1/vault/
 
 When typing a reference by hand, copy the record UID from Keeper. A record title also works in Keeper's notation, but prefer the UID. OneCLI accepts the `field`, `custom_field` and `file` forms (a record, a selector and a name); Keeper's two-part short forms (`/title`, `/notes`, `/type`) are not accepted. The record must be shared with the Secrets Manager application.
 
-Pairing and status are served on the provider-generic routes (`/v1/vault/keepersecurity/{pair,status}`); `pair` takes either `{ "one_time_token": "US:..." }` or `{ "ksm_config": "<base64 or JSON>" }`.
+Pairing and status are served on the provider-generic routes (`/v1/vault/keepersecurity/{pair,status}`); `pair` takes either `{ "one_time_token": "US:..." }` or `{ "ksm_config": "<config>", "ksm_config_format": "base64" | "json" }`. The format is required with a config and is never inferred from the text; the config is decoded as stated, validated with Keeper, and stored (encrypted) as JSON, the form every later call uses.
 
 Behavior worth knowing:
 

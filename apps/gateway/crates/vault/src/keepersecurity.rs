@@ -58,18 +58,46 @@ pub struct KeeperSecurityConfig {
     pub encrypted_ksm_config: String,
 }
 
-/// What a `pair` request carries: a ready KSM config, or a single-use one-time
-/// token (e.g. `US:xxxx`) that must be bound to a config first.
+/// How a pasted KSM config is encoded, as the user chose it in the connect
+/// form (`ksm_config_format`). Never inferred from the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFormat {
+    Json,
+    Base64,
+}
+
+impl ConfigFormat {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "json" => Some(Self::Json),
+            "base64" => Some(Self::Base64),
+            _ => None,
+        }
+    }
+
+    /// The name the internal API takes.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Base64 => "base64",
+        }
+    }
+}
+
+/// What a `pair` request carries: a ready KSM config in the format the user
+/// chose, or a single-use one-time token (e.g. `US:xxxx`) that must be bound
+/// to a config first.
 #[derive(Debug, PartialEq, Eq)]
 enum PairInput<'a> {
-    Config(&'a str),
+    Config(&'a str, ConfigFormat),
     OneTimeToken(&'a str),
 }
 
 /// Pick the credential out of a `pair` body. A config wins over a token when both
 /// are sent (the token would otherwise be spent for nothing). Blank or non-string
 /// values count as absent, so a form submitted empty fails here with a clear
-/// message instead of reaching the Keeper SDK.
+/// message instead of reaching the Keeper SDK. A config must say how it is
+/// encoded (`ksm_config_format`): nothing downstream guesses.
 fn parse_pair_input(params: &serde_json::Value) -> Result<PairInput<'_>> {
     let field = |name: &str| {
         params
@@ -79,7 +107,12 @@ fn parse_pair_input(params: &serde_json::Value) -> Result<PairInput<'_>> {
             .filter(|v| !v.is_empty())
     };
     if let Some(config) = field("ksm_config") {
-        Ok(PairInput::Config(config))
+        let format = field("ksm_config_format")
+            .and_then(ConfigFormat::parse)
+            .ok_or_else(|| {
+                anyhow!("missing or unknown ksm_config_format (expected json or base64)")
+            })?;
+        Ok(PairInput::Config(config, format))
     } else if let Some(token) = field("one_time_token") {
         Ok(PairInput::OneTimeToken(token))
     } else {
@@ -489,27 +522,31 @@ impl VaultProvider for KeeperSecurityVaultProvider {
     }
 
     async fn pair(&self, workspace_id: &str, params: &serde_json::Value) -> Result<PairResult> {
-        // Only the config is ever stored: a one-time token is single-use, so it
-        // is bound to a config first and then discarded.
-        let bound;
-        let ksm_config: &str = match parse_pair_input(params)? {
-            PairInput::Config(cfg) => cfg,
+        // Only the config is ever stored, always as the JSON the internal API
+        // works with: a one-time token is single-use, so it is bound to a
+        // config (JSON) first and then discarded; a pasted config is decoded
+        // in the format the user chose. Either way it is validated with Keeper
+        // before it is persisted.
+        let ksm_config: String = match parse_pair_input(params)? {
+            PairInput::Config(cfg, format) => {
+                keepersecurity_api::validate_pasted(cfg, format.as_str())
+                    .await
+                    .map_err(|e| anyhow!("config validation failed: {e}"))?
+            }
             PairInput::OneTimeToken(token) => {
-                bound = keepersecurity_api::bind(token)
+                let bound = keepersecurity_api::bind(token)
                     .await
                     .map_err(|e| anyhow!("one-time token binding failed: {e}"))?;
-                &bound
+                keepersecurity_api::validate(&bound)
+                    .await
+                    .map_err(|e| anyhow!("config validation failed: {e}"))?;
+                bound
             }
         };
 
-        // Validate the config via the Node SDK service before persisting it.
-        keepersecurity_api::validate(ksm_config)
-            .await
-            .map_err(|e| anyhow!("config validation failed: {e}"))?;
-
         let encrypted = self
             .crypto
-            .encrypt(ksm_config)
+            .encrypt(&ksm_config)
             .await
             .map_err(|e| anyhow!("encryption failed: {e}"))?;
 
@@ -666,9 +703,31 @@ mod tests {
     // ── pair input ──────────────────────────────────────────────────────
 
     #[test]
-    fn pair_accepts_a_config() {
-        let body = json!({ "ksm_config": "e30=" });
-        assert_eq!(parse_pair_input(&body).unwrap(), PairInput::Config("e30="));
+    fn pair_accepts_a_config_in_the_format_chosen() {
+        let body = json!({ "ksm_config": "e30=", "ksm_config_format": "base64" });
+        assert_eq!(
+            parse_pair_input(&body).unwrap(),
+            PairInput::Config("e30=", ConfigFormat::Base64)
+        );
+        let body = json!({ "ksm_config": "{}", "ksm_config_format": "json" });
+        assert_eq!(
+            parse_pair_input(&body).unwrap(),
+            PairInput::Config("{}", ConfigFormat::Json)
+        );
+    }
+
+    // The format is never guessed from the config text.
+    #[test]
+    fn pair_rejects_a_config_without_a_known_format() {
+        for body in [
+            json!({ "ksm_config": "e30=" }),
+            json!({ "ksm_config": "e30=", "ksm_config_format": "" }),
+            json!({ "ksm_config": "e30=", "ksm_config_format": "yaml" }),
+            json!({ "ksm_config": "e30=", "ksm_config_format": 1 }),
+        ] {
+            let err = parse_pair_input(&body).unwrap_err().to_string();
+            assert!(err.contains("ksm_config_format"), "{body}: {err}");
+        }
     }
 
     #[test]
@@ -693,8 +752,15 @@ mod tests {
     // for a connection that is already usable.
     #[test]
     fn pair_prefers_the_config_when_both_are_sent() {
-        let body = json!({ "ksm_config": "cfg", "one_time_token": "US:abc" });
-        assert_eq!(parse_pair_input(&body).unwrap(), PairInput::Config("cfg"));
+        let body = json!({
+            "ksm_config": "cfg",
+            "ksm_config_format": "json",
+            "one_time_token": "US:abc",
+        });
+        assert_eq!(
+            parse_pair_input(&body).unwrap(),
+            PairInput::Config("cfg", ConfigFormat::Json)
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ import {
   keeperFailure,
   listRecordFields,
   listRecords,
+  normalizeConfig,
   resolveSecret,
   validateConfig,
 } from "./keepersecurity-service";
@@ -50,50 +51,92 @@ beforeEach(() => {
   sdk.loadJsonConfig.mockImplementation((json: string) => ({ json }));
 });
 
-describe("config parsing", () => {
-  it.each([
-    ["raw JSON", CONFIG_JSON],
-    ["base64-encoded JSON", CONFIG_B64],
-    ["JSON with surrounding whitespace", `\n  ${CONFIG_JSON}  \n`],
-  ])("accepts %s", async (_name, config) => {
-    sdk.getNotationResults.mockResolvedValue(["secret"]);
-    await expect(resolveSecret(config, REF)).resolves.toBe("secret");
-    expect(sdk.loadJsonConfig).toHaveBeenCalledOnce();
+describe("normalizeConfig", () => {
+  it("decodes a base64 config into the stored JSON form", () => {
+    expect(JSON.parse(normalizeConfig(CONFIG_B64, "base64"))).toEqual(CONFIG);
   });
 
-  it("points a pasted one-time token at the right flow", async () => {
-    const err = await rejection(
-      resolveSecret("US:tpW8qZLAZklF_dfyYLtEr-6_JYLotWk-N5-zVhPq0DU", REF),
+  it("keeps a JSON config, in the stored JSON form", () => {
+    expect(JSON.parse(normalizeConfig(CONFIG_JSON, "json"))).toEqual(CONFIG);
+  });
+
+  it("ignores surrounding whitespace", () => {
+    expect(
+      JSON.parse(normalizeConfig(`\n  ${CONFIG_JSON}  \n`, "json")),
+    ).toEqual(CONFIG);
+    expect(JSON.parse(normalizeConfig(` ${CONFIG_B64}\n`, "base64"))).toEqual(
+      CONFIG,
     );
-    expect(err.code).toBe("BAD_REQUEST");
-    expect(err.message).toMatch(/one-time token/);
-    expect(sdk.getNotationResults).not.toHaveBeenCalled();
   });
 
-  it("rejects input that is neither JSON nor base64 JSON, without echoing it", async () => {
-    const err = await rejection(resolveSecret("not a config at all", REF));
-    expect(err.code).toBe("BAD_REQUEST");
-    expect(err.message).toMatch(/JSON or base64-encoded JSON/);
-    expect(err.message).not.toContain("not a config at all");
+  // The format is what the user chose; the text is never reinterpreted.
+  it("does not accept JSON when told it is base64", () => {
+    expect(() => normalizeConfig(CONFIG_JSON, "base64")).toThrow(
+      /base64-encoded JSON/,
+    );
   });
 
-  it("rejects JSON that is not an object", async () => {
+  it("does not accept base64 when told it is JSON", () => {
+    expect(() => normalizeConfig(CONFIG_B64, "json")).toThrow(
+      /expected a JSON configuration/,
+    );
+  });
+
+  it("does not treat a one-time token as a config", () => {
+    expect(() => normalizeConfig("US:abc123", "base64")).toThrow(ServiceError);
+    expect(() => normalizeConfig("US:abc123", "json")).toThrow(ServiceError);
+  });
+
+  it("rejects input without echoing it", () => {
+    let err: unknown;
+    try {
+      normalizeConfig("not a config at all", "json");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ServiceError);
+    expect((err as ServiceError).message).not.toContain("not a config at all");
+  });
+
+  it("rejects JSON that is not an object", () => {
     const asBase64 = Buffer.from("[1,2,3]").toString("base64");
-    const err = await rejection(resolveSecret(asBase64, REF));
-    expect(err.message).toMatch(/JSON object/);
+    expect(() => normalizeConfig(asBase64, "base64")).toThrow(/JSON object/);
   });
 
   it.each(["hostname", "clientId", "privateKey", "appKey"])(
     "rejects a config missing %s",
-    async (key) => {
+    (key) => {
       const rest = Object.fromEntries(
         Object.entries(CONFIG).filter(([k]) => k !== key),
       );
-      const err = await rejection(resolveSecret(JSON.stringify(rest), REF));
-      expect(err.message).toContain(`missing ${key}`);
-      expect(sdk.getNotationResults).not.toHaveBeenCalled();
+      expect(() => normalizeConfig(JSON.stringify(rest), "json")).toThrow(
+        `missing ${key}`,
+      );
     },
   );
+});
+
+// Every SDK call reads the config the gateway stored: the JSON produced at
+// pair time. Nothing is decoded or guessed at this point.
+describe("stored config", () => {
+  it("is used as is", async () => {
+    sdk.getNotationResults.mockResolvedValue(["secret"]);
+    await expect(resolveSecret(CONFIG_JSON, REF)).resolves.toBe("secret");
+    expect(sdk.loadJsonConfig).toHaveBeenCalledWith(CONFIG_JSON);
+  });
+
+  it("must be JSON: a base64 config is not decoded here", async () => {
+    const err = await rejection(resolveSecret(CONFIG_B64, REF));
+    expect(err.code).toBe("BAD_REQUEST");
+    expect(err.message).toMatch(/disconnect and connect again/);
+    expect(sdk.getNotationResults).not.toHaveBeenCalled();
+  });
+
+  it("must have the keys the SDK needs", async () => {
+    const err = await rejection(resolveSecret('{"hostname":"h"}', REF));
+    expect(err.message).toContain("missing clientId");
+    expect(sdk.getNotationResults).not.toHaveBeenCalled();
+  });
 });
 
 describe("resolveSecret", () => {

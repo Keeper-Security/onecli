@@ -40,11 +40,21 @@ const isJsonObject = (text: string): boolean => {
   }
 };
 
-/** The `pair` body for a method: a token is bound server-side, a config is used as is. */
-const pairBody = (method: KeeperSecurityPairMethod, value: string) =>
-  method === "one_time_token"
-    ? { one_time_token: value }
-    : { ksm_config: value };
+/**
+ * The `pair` body for a method. A token is bound server-side; a config carries
+ * the format the user chose (`ksm_config_format`), so the server decodes it
+ * as told and never guesses from the text.
+ */
+const pairBody = (method: KeeperSecurityPairMethod, value: string) => {
+  switch (method) {
+    case "one_time_token":
+      return { one_time_token: value };
+    case "base64_config":
+      return { ksm_config: value, ksm_config_format: "base64" };
+    case "json_config":
+      return { ksm_config: value, ksm_config_format: "json" };
+  }
+};
 
 /**
  * Pair with Keeper Secrets Manager. Accepts either a one-time access token
