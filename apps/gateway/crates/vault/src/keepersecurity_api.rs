@@ -23,6 +23,9 @@ pub enum KeeperSecurityError {
     NotFound(String),
     /// The request was rejected as invalid (bad reference or bad config).
     BadRequest(String),
+    /// Keeper refused the application itself (`access_denied`): it was revoked
+    /// or its client removed. Nothing resolves until the workspace re-pairs.
+    AccessDenied(String),
     /// Network failure, timeout, or server error — retry after a cooldown.
     Transient(String),
 }
@@ -30,9 +33,31 @@ pub enum KeeperSecurityError {
 impl std::fmt::Display for KeeperSecurityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::BadRequest(m) | Self::Transient(m) => write!(f, "{m}"),
+            Self::NotFound(m)
+            | Self::BadRequest(m)
+            | Self::AccessDenied(m)
+            | Self::Transient(m) => {
+                write!(f, "{m}")
+            }
         }
     }
+}
+
+/// What a successful connectivity check learned about the application's
+/// access. Every field defaults, so an API server that predates them (and
+/// answers `{ "valid": true }`) reads as "no limits known".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeeperSecurityHealth {
+    /// Distinct records shared with the application; `None` when unknown.
+    #[serde(default)]
+    pub record_count: Option<u64>,
+    /// When the application's access expires (ISO 8601), if Keeper set a limit.
+    #[serde(default)]
+    pub expires_on: Option<String>,
+    /// Warnings Keeper attached to the response, verbatim.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Where the api-server answers when nothing overrides it — the bare-metal /
@@ -107,13 +132,16 @@ pub async fn bind(token: &str) -> Result<String, KeeperSecurityError> {
     Ok(body.config)
 }
 
-/// Validate a KSM config (used at pair time and for `status`).
-pub async fn validate(config: &str) -> Result<(), KeeperSecurityError> {
+/// Validate a KSM config (used at pair time and for `status`), returning what
+/// Keeper reported about the application's access.
+pub async fn validate(config: &str) -> Result<KeeperSecurityHealth, KeeperSecurityError> {
     let resp = send("validate", &serde_json::json!({ "config": config })).await?;
-    if resp.status().is_success() {
-        return Ok(());
+    if !resp.status().is_success() {
+        return Err(classify(resp).await);
     }
-    Err(classify(resp).await)
+    resp.json()
+        .await
+        .map_err(|e| KeeperSecurityError::Transient(format!("invalid validate response: {e}")))
 }
 
 /// Resolve a `keeper://` reference to its plaintext secret value.
@@ -204,9 +232,17 @@ async fn classify(resp: reqwest::Response) -> KeeperSecurityError {
         }) => m,
         _ => format!("internal keepersecurity API returned {status}"),
     };
-    match status.as_u16() {
+    classify_status(status.as_u16(), msg)
+}
+
+/// Map the internal API's status to an error kind. Only 403 means Keeper
+/// refused the application: the internal API's own auth failure is a 401
+/// (a gateway misconfiguration, so transient from Keeper's point of view).
+fn classify_status(status: u16, msg: String) -> KeeperSecurityError {
+    match status {
         404 => KeeperSecurityError::NotFound(msg),
         400 => KeeperSecurityError::BadRequest(msg),
+        403 => KeeperSecurityError::AccessDenied(msg),
         _ => KeeperSecurityError::Transient(msg),
     }
 }
@@ -217,6 +253,61 @@ async fn classify(resp: reqwest::Response) -> KeeperSecurityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_403_means_keeper_refused_the_application() {
+        assert!(matches!(
+            classify_status(403, "denied".into()),
+            KeeperSecurityError::AccessDenied(m) if m == "denied"
+        ));
+    }
+
+    // 401 is the internal API rejecting the gateway's shared secret, not
+    // Keeper rejecting the application: re-pairing would not fix it.
+    #[test]
+    fn other_statuses_keep_their_meaning() {
+        assert!(matches!(
+            classify_status(404, String::new()),
+            KeeperSecurityError::NotFound(_)
+        ));
+        assert!(matches!(
+            classify_status(400, String::new()),
+            KeeperSecurityError::BadRequest(_)
+        ));
+        for status in [401, 429, 500, 502] {
+            assert!(matches!(
+                classify_status(status, String::new()),
+                KeeperSecurityError::Transient(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn health_reads_the_full_validate_response() {
+        let health: KeeperSecurityHealth = serde_json::from_value(serde_json::json!({
+            "valid": true,
+            "recordCount": 3,
+            "expiresOn": "2026-12-01T00:00:00.000Z",
+            "warnings": ["w"],
+        }))
+        .unwrap();
+        assert_eq!(
+            health,
+            KeeperSecurityHealth {
+                record_count: Some(3),
+                expires_on: Some("2026-12-01T00:00:00.000Z".into()),
+                warnings: vec!["w".into()],
+            }
+        );
+    }
+
+    // An API server from before these fields answers `{ "valid": true }`.
+    #[test]
+    fn health_tolerates_an_older_api_server() {
+        let health: KeeperSecurityHealth =
+            serde_json::from_value(serde_json::json!({ "valid": true })).unwrap();
+        assert_eq!(health, KeeperSecurityHealth::default());
+    }
 
     #[test]
     fn explicit_internal_url_wins_and_is_trimmed() {

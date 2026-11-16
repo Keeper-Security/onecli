@@ -1346,6 +1346,7 @@ async fn handle_http_proxy(
         available_apps: resolved.available_apps,
         access_restricted: resolved.access_restricted,
         credential_unavailable: resolved.credential_unavailable,
+        credential_unavailable_vault: resolved.credential_unavailable_vault,
         intercept_token: None,
         plan: resolved.plan,
         rewrite_host: None,

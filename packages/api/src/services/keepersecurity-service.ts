@@ -24,6 +24,67 @@ import { ServiceError } from "./errors";
 const errMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
+/** What Keeper said when it refused a call. */
+interface KeeperFailure {
+  /** Keeper's error code (e.g. `access_denied`), when it sent one. */
+  code?: string;
+  /** Keeper's human-readable message, else the raw error text. */
+  message: string;
+}
+
+/**
+ * When Keeper refuses a call, the SDK throws its JSON error body verbatim as
+ * the message, e.g. `{"error":"access_denied","message":"Unable to validate
+ * Keeper application access",...}`. Pull out the code and the readable
+ * message; anything else (network errors, SDK errors) passes through as is.
+ */
+export const keeperFailure = (err: unknown): KeeperFailure => {
+  const raw = errMessage(err);
+  try {
+    const body: unknown = JSON.parse(raw);
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      const b = body as Record<string, unknown>;
+      const str = (v: unknown) =>
+        typeof v === "string" && v.trim() ? v : undefined;
+      const code = str(b.result_code) ?? str(b.error);
+      return { code, message: str(b.message) ?? code ?? raw };
+    }
+  } catch {
+    // Not a Keeper error body.
+  }
+  return { message: raw };
+};
+
+/**
+ * Keeper refused the application itself. Keeper does not say why, and there
+ * are several reasons it might (access expired or revoked, the client device
+ * removed, an IP restriction), so the message names none of them as the
+ * cause: it passes on what Keeper said.
+ */
+export const accessDeniedMessage = (keeperMessage: string): string =>
+  `Keeper refused OneCLI's Secrets Manager application: ${keeperMessage}`;
+
+/**
+ * Turn a Keeper SDK failure into a ServiceError. `access_denied` is FORBIDDEN
+ * (the whole connection is unusable until something changes in Keeper or it
+ * is re-paired); anything else is BAD_REQUEST, prefixed with what was being
+ * attempted.
+ */
+const keeperError = (
+  prefix: string,
+  err: unknown,
+  logFields: Record<string, unknown> = {},
+): ServiceError => {
+  const failure = keeperFailure(err);
+  logger.warn(
+    { ...logFields, code: failure.code, err: failure.message },
+    `keepersecurity call failed: ${prefix}`,
+  );
+  return failure.code === "access_denied"
+    ? new ServiceError("FORBIDDEN", accessDeniedMessage(failure.message))
+    : new ServiceError("BAD_REQUEST", `${prefix}: ${failure.message}`);
+};
+
 /** A one-time token looks like `US:` / `EU:` followed by url-safe base64. */
 const ONE_TIME_TOKEN = /^[A-Za-z]{2,}:[\w-]+$/;
 
@@ -92,31 +153,50 @@ export const bindOneTimeToken = async (token: string): Promise<string> => {
     await getSecrets({ storage });
     return JSON.stringify(store);
   } catch (err) {
+    const failure = keeperFailure(err);
     logger.warn(
-      { err: errMessage(err) },
+      { code: failure.code, err: failure.message },
       "keepersecurity one-time token bind failed",
     );
     throw new ServiceError(
       "BAD_REQUEST",
-      `keepersecurity one-time token could not be bound (already used or expired?): ${errMessage(err)}`,
+      `keepersecurity one-time token could not be bound (already used or expired?): ${failure.message}`,
     );
   }
 };
 
-/** Validate a KSM config with a cheap connectivity check (list accessible records). */
-export const validateConfig = async (config: string): Promise<void> => {
+/** What a successful connectivity check learned about the application's access. */
+export interface KeeperSecurityHealth {
+  /** Distinct records shared with the application. 0 = it can read nothing. */
+  recordCount: number;
+  /** When the application's access expires (ISO 8601), if Keeper set a limit. */
+  expiresOn?: string;
+  /** Warnings Keeper attached to the response, verbatim. */
+  warnings?: string[];
+}
+
+/**
+ * Validate a KSM config with a cheap connectivity check (list accessible
+ * records), and report what it saw. Keeper answers an application with nothing
+ * shared, or whose shares were removed, with success and an empty list, so
+ * `recordCount` is how a caller tells "connected" from "connected, no access".
+ */
+export const validateConfig = async (
+  config: string,
+): Promise<KeeperSecurityHealth> => {
   const storage = toStorage(config);
   try {
-    await getSecrets({ storage });
+    const secrets = await getSecrets({ storage });
+    const uids = new Set((secrets.records ?? []).map((r) => r.recordUid));
+    return {
+      recordCount: uids.size,
+      ...(secrets.expiresOn
+        ? { expiresOn: new Date(secrets.expiresOn).toISOString() }
+        : {}),
+      ...(secrets.warnings?.length ? { warnings: secrets.warnings } : {}),
+    };
   } catch (err) {
-    logger.warn(
-      { err: errMessage(err) },
-      "keepersecurity config validation failed",
-    );
-    throw new ServiceError(
-      "BAD_REQUEST",
-      `keepersecurity config validation failed: ${errMessage(err)}`,
-    );
+    throw keeperError("keepersecurity config validation failed", err);
   }
 };
 
@@ -132,14 +212,9 @@ export const resolveSecret = async (
     // A multi-value field resolves to its first value.
     return String(results[0]);
   } catch (err) {
-    logger.warn(
-      { keepersecurityRef, err: errMessage(err) },
-      "keepersecurity resolve failed",
-    );
-    throw new ServiceError(
-      "BAD_REQUEST",
-      `cannot resolve ${keepersecurityRef}: ${errMessage(err)}`,
-    );
+    throw keeperError(`cannot resolve ${keepersecurityRef}`, err, {
+      keepersecurityRef,
+    });
   }
 };
 
@@ -330,14 +405,7 @@ export const listRecords = async (
     }
     return records.sort((a, b) => a.title.localeCompare(b.title));
   } catch (err) {
-    logger.warn(
-      { err: errMessage(err) },
-      "keepersecurity record listing failed",
-    );
-    throw new ServiceError(
-      "BAD_REQUEST",
-      `cannot list keepersecurity records: ${errMessage(err)}`,
-    );
+    throw keeperError("cannot list keepersecurity records", err);
   }
 };
 
@@ -352,14 +420,7 @@ export const getRecordFields = async (
     const secrets = await getSecrets({ storage }, [recordUid]);
     record = secrets.records.find((r) => r.recordUid === recordUid);
   } catch (err) {
-    logger.warn(
-      { recordUid, err: errMessage(err) },
-      "keepersecurity record read failed",
-    );
-    throw new ServiceError(
-      "BAD_REQUEST",
-      `cannot read keepersecurity record: ${errMessage(err)}`,
-    );
+    throw keeperError("cannot read keepersecurity record", err, { recordUid });
   }
   if (!record) {
     throw new ServiceError(

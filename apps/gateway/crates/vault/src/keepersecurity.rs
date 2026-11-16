@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
-use super::keepersecurity_api::{self, KeeperSecurityError};
+use super::keepersecurity_api::{self, KeeperSecurityError, KeeperSecurityHealth};
 use super::{
     check_session, PairResult, ProviderStatus, SessionCheck, VaultCredential, VaultError,
     VaultProvider,
@@ -40,6 +40,9 @@ const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(30);
 const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 /// How long a successful `status` connectivity check is trusted before re-checking.
 const STATUS_OK_TTL: Duration = Duration::from_secs(30);
+/// `status_data.reason` when OneCLI can't use the connection at all, whatever
+/// the cause (see [`KeeperSecuritySession::status_data`]).
+const REASON_CONNECTION_FAILED: &str = "connection_failed";
 const EVICTION_INTERVAL: Duration = Duration::from_secs(300);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
 
@@ -103,16 +106,124 @@ struct KeeperSecuritySession {
     error_until: Mutex<Option<Instant>>,
     /// Timestamp of the last successful connectivity check (positive `status` cache).
     last_ok: Mutex<Option<Instant>>,
+    /// Keeper refused the application (`access_denied`) on the last call that
+    /// reached it. Set by any call (status, resolve, picker), cleared by the
+    /// next one Keeper accepts.
+    access_denied: Mutex<bool>,
+    /// What the last successful connectivity check reported (records shared,
+    /// access expiry, warnings).
+    health: Mutex<Option<KeeperSecurityHealth>>,
+    /// The last reference an agent request could not resolve, so a single
+    /// broken secret shows on the dashboard rather than only in the log.
+    /// Cleared when that same reference next resolves.
+    resolve_error: Mutex<Option<ResolveError>>,
+}
+
+/// A reference that failed to resolve, and why. Never holds a value.
+#[derive(Clone, Serialize)]
+struct ResolveError {
+    #[serde(rename = "ref")]
+    reference: String,
+    message: String,
 }
 
 impl KeeperSecuritySession {
+    fn new(decrypted_config: String, generation: VaultGeneration) -> Self {
+        Self {
+            decrypted_config,
+            generation,
+            ref_cache: DashMap::new(),
+            last_used: Mutex::new(Instant::now()),
+            last_error: Mutex::new(None),
+            error_until: Mutex::new(None),
+            last_ok: Mutex::new(None),
+            access_denied: Mutex::new(false),
+            health: Mutex::new(None),
+            resolve_error: Mutex::new(None),
+        }
+    }
+
     /// Whether the session is still within its post-error cooldown window (set
-    /// when a `Transient` Keeper failure was last seen).
+    /// when a `Transient` or `AccessDenied` Keeper failure was last seen).
     fn in_error_cooldown(&self) -> bool {
         self.error_until
             .lock()
             .expect("session lock poisoned")
             .is_some_and(|t| Instant::now() < t)
+    }
+
+    fn is_access_denied(&self) -> bool {
+        *self.access_denied.lock().expect("session lock poisoned")
+    }
+
+    /// Keeper refused the application: report it, back off so agent traffic
+    /// does not hammer Keeper with calls it will refuse, and stop serving
+    /// values resolved before the revocation (and a stale "connected").
+    fn mark_access_denied(&self, msg: &str) {
+        *self.access_denied.lock().expect("session lock poisoned") = true;
+        *self.last_error.lock().expect("session lock poisoned") = Some(msg.to_string());
+        *self.error_until.lock().expect("session lock poisoned") =
+            Some(Instant::now() + ERROR_COOLDOWN);
+        *self.last_ok.lock().expect("session lock poisoned") = None;
+        self.ref_cache.clear();
+    }
+
+    /// Keeper accepted a call: whatever refused it before no longer does.
+    fn mark_reachable(&self) {
+        *self.access_denied.lock().expect("session lock poisoned") = false;
+        *self.last_error.lock().expect("session lock poisoned") = None;
+    }
+
+    /// Record a failure from any call, by kind. Reference-level failures
+    /// (`NotFound`/`BadRequest`) say nothing about the connection as a whole,
+    /// so only the resolve path records those, against the reference.
+    fn note_connection_failure(&self, err: &KeeperSecurityError) {
+        match err {
+            KeeperSecurityError::AccessDenied(msg) => self.mark_access_denied(msg),
+            KeeperSecurityError::Transient(msg) => {
+                *self.last_error.lock().expect("session lock poisoned") = Some(msg.clone());
+                *self.error_until.lock().expect("session lock poisoned") =
+                    Some(Instant::now() + ERROR_COOLDOWN);
+            }
+            KeeperSecurityError::NotFound(_) | KeeperSecurityError::BadRequest(_) => {}
+        }
+    }
+
+    /// `status_data` for a paired session: the error, why the connection
+    /// can't serve credentials (`reason`), and what Keeper reported.
+    ///
+    /// `reason` is deliberately coarse. OneCLI cannot always tell why it can't
+    /// talk to Keeper (access expired or revoked, device removed, Keeper or
+    /// the internal API unreachable, a throttle), and the fix is the same
+    /// either way, so every failed connectivity check reads
+    /// `connection_failed`, with the detail in `last_error`.
+    fn status_data(&self, connected: bool) -> serde_json::Value {
+        let health = self
+            .health
+            .lock()
+            .expect("session lock poisoned")
+            .clone()
+            .unwrap_or_default();
+        let last_error = self
+            .last_error
+            .lock()
+            .expect("session lock poisoned")
+            .clone();
+        let reason = if self.is_access_denied() || (!connected && last_error.is_some()) {
+            Some(REASON_CONNECTION_FAILED)
+        } else if connected && health.record_count == Some(0) {
+            Some("no_records")
+        } else {
+            None
+        };
+        serde_json::json!({
+            "last_error": last_error,
+            "reason": reason,
+            "record_count": health.record_count,
+            "expires_on": health.expires_on,
+            "warnings": health.warnings,
+            "resolve_error": *self.resolve_error.lock().expect("session lock poisoned"),
+        })
     }
 }
 
@@ -230,15 +341,7 @@ impl KeeperSecurityVaultProvider {
                 VaultError::Internal("token decryption failed; re-pair to fix".into())
             })?;
 
-        let session = Arc::new(KeeperSecuritySession {
-            decrypted_config: ksm_config,
-            generation: row.generation,
-            ref_cache: DashMap::new(),
-            last_used: Mutex::new(Instant::now()),
-            last_error: Mutex::new(None),
-            error_until: Mutex::new(None),
-            last_ok: Mutex::new(None),
-        });
+        let session = Arc::new(KeeperSecuritySession::new(ksm_config, row.generation));
         self.sessions
             .insert(workspace_id.to_string(), Arc::clone(&session));
         Ok(Some(session))
@@ -283,6 +386,11 @@ impl KeeperSecurityVaultProvider {
         }
 
         if session.in_error_cooldown() {
+            if session.is_access_denied() {
+                return Err(VaultError::Forbidden(
+                    "keepersecurity refused the Secrets Manager application (cooldown)".into(),
+                ));
+            }
             return Err(VaultError::Internal(
                 "keepersecurity temporarily unavailable (cooldown)".into(),
             ));
@@ -290,7 +398,16 @@ impl KeeperSecurityVaultProvider {
 
         match keepersecurity_api::resolve(&session.decrypted_config, keepersecurity_ref).await {
             Ok(value) if !value.is_empty() => {
-                *session.last_error.lock().expect("session lock poisoned") = None;
+                session.mark_reachable();
+                {
+                    let mut failed = session.resolve_error.lock().expect("session lock poisoned");
+                    if failed
+                        .as_ref()
+                        .is_some_and(|f| f.reference == keepersecurity_ref)
+                    {
+                        *failed = None;
+                    }
+                }
                 session.ref_cache.insert(
                     keepersecurity_ref.to_string(),
                     CachedRef {
@@ -301,20 +418,23 @@ impl KeeperSecurityVaultProvider {
                 Ok(value)
             }
             Ok(_) => {
+                let msg = format!("{keepersecurity_ref} resolved to an empty value");
                 self.cache_negative(&session, keepersecurity_ref);
-                Err(VaultError::BadRequest(format!(
-                    "{keepersecurity_ref} resolved to an empty value"
-                )))
+                record_resolve_error(&session, keepersecurity_ref, &msg);
+                Err(VaultError::BadRequest(msg))
             }
             Err(KeeperSecurityError::NotFound(msg)) | Err(KeeperSecurityError::BadRequest(msg)) => {
                 self.cache_negative(&session, keepersecurity_ref);
+                record_resolve_error(&session, keepersecurity_ref, &msg);
                 Err(VaultError::BadRequest(msg))
             }
-            Err(KeeperSecurityError::Transient(msg)) => {
-                *session.last_error.lock().expect("session lock poisoned") = Some(msg.clone());
-                *session.error_until.lock().expect("session lock poisoned") =
-                    Some(Instant::now() + ERROR_COOLDOWN);
-                Err(VaultError::Internal(msg))
+            Err(e @ KeeperSecurityError::AccessDenied(_)) => {
+                session.note_connection_failure(&e);
+                Err(VaultError::Forbidden(e.to_string()))
+            }
+            Err(e @ KeeperSecurityError::Transient(_)) => {
+                session.note_connection_failure(&e);
+                Err(VaultError::Internal(e.to_string()))
             }
         }
     }
@@ -335,9 +455,8 @@ impl KeeperSecurityVaultProvider {
 
     pub async fn list_records(&self, workspace_id: &str) -> Result<serde_json::Value, VaultError> {
         let session = self.picker_session(workspace_id).await?;
-        keepersecurity_api::list_records(&session.decrypted_config)
-            .await
-            .map_err(keepersecurity_err_to_vault)
+        let result = keepersecurity_api::list_records(&session.decrypted_config).await;
+        picker_outcome(&session, result)
     }
 
     pub async fn list_fields(
@@ -346,9 +465,8 @@ impl KeeperSecurityVaultProvider {
         record_uid: &str,
     ) -> Result<serde_json::Value, VaultError> {
         let session = self.picker_session(workspace_id).await?;
-        keepersecurity_api::list_fields(&session.decrypted_config, record_uid)
-            .await
-            .map_err(keepersecurity_err_to_vault)
+        let result = keepersecurity_api::list_fields(&session.decrypted_config, record_uid).await;
+        picker_outcome(&session, result)
     }
 
     /// Load a connected session for picker calls, or 404 if not paired.
@@ -437,22 +555,22 @@ impl VaultProvider for KeeperSecurityVaultProvider {
                 return ProviderStatus {
                     connected: false,
                     name: None,
-                    status_data: Some(serde_json::json!({ "last_error": e.to_string() })),
-                }
+                    // The stored connection can't be loaded (e.g. it no longer
+                    // decrypts): as unusable as an unreachable Keeper.
+                    status_data: Some(serde_json::json!({
+                        "last_error": e.to_string(),
+                        "reason": REASON_CONNECTION_FAILED,
+                    })),
+                };
             }
         };
 
         let connected = live_check(&session).await;
-        let last_err = session
-            .last_error
-            .lock()
-            .expect("session lock poisoned")
-            .clone();
 
         ProviderStatus {
             connected,
             name: None,
-            status_data: Some(serde_json::json!({ "last_error": last_err })),
+            status_data: Some(session.status_data(connected)),
         }
     }
 
@@ -481,11 +599,19 @@ async fn live_check(session: &KeeperSecuritySession) -> bool {
         return true;
     }
     match keepersecurity_api::validate(&session.decrypted_config).await {
-        Ok(()) => {
-            *session.last_error.lock().expect("session lock poisoned") = None;
+        Ok(health) => {
+            session.mark_reachable();
+            *session.health.lock().expect("session lock poisoned") = Some(health);
             *session.last_ok.lock().expect("session lock poisoned") = Some(Instant::now());
             true
         }
+        Err(KeeperSecurityError::AccessDenied(msg)) => {
+            session.mark_access_denied(&msg);
+            false
+        }
+        // Any other failure of the connectivity check (an outage, or a config
+        // Keeper rejects) leaves the connection unusable for now: report it and
+        // back off.
         Err(e) => {
             *session.last_error.lock().expect("session lock poisoned") = Some(e.to_string());
             *session.error_until.lock().expect("session lock poisoned") =
@@ -495,10 +621,37 @@ async fn live_check(session: &KeeperSecuritySession) -> bool {
     }
 }
 
+/// Remember the reference an agent request could not resolve (never a value).
+fn record_resolve_error(session: &KeeperSecuritySession, reference: &str, message: &str) {
+    *session.resolve_error.lock().expect("session lock poisoned") = Some(ResolveError {
+        reference: reference.to_string(),
+        message: message.to_string(),
+    });
+}
+
+/// A picker call's result, with connection-level failures recorded on the
+/// session so the dashboard reflects them too.
+fn picker_outcome(
+    session: &KeeperSecuritySession,
+    result: Result<serde_json::Value, KeeperSecurityError>,
+) -> Result<serde_json::Value, VaultError> {
+    match result {
+        Ok(v) => {
+            session.mark_reachable();
+            Ok(v)
+        }
+        Err(e) => {
+            session.note_connection_failure(&e);
+            Err(keepersecurity_err_to_vault(e))
+        }
+    }
+}
+
 fn keepersecurity_err_to_vault(e: KeeperSecurityError) -> VaultError {
     match e {
         KeeperSecurityError::NotFound(m) => VaultError::NotFound(m),
         KeeperSecurityError::BadRequest(m) => VaultError::BadRequest(m),
+        KeeperSecurityError::AccessDenied(m) => VaultError::Forbidden(m),
         KeeperSecurityError::Transient(m) => VaultError::Internal(m),
     }
 }
@@ -598,6 +751,116 @@ mod tests {
         });
         let config: KeeperSecurityConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.encrypted_ksm_config, "iv:tag:ct");
+    }
+
+    // ── Connection health (what `status` reports) ───────────────────────
+
+    fn session() -> KeeperSecuritySession {
+        KeeperSecuritySession::new("cfg".into(), VaultGeneration(1))
+    }
+
+    fn healthy(records: u64) -> KeeperSecurityHealth {
+        KeeperSecurityHealth {
+            record_count: Some(records),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_healthy_session_reports_no_reason() {
+        let s = session();
+        *s.health.lock().unwrap() = Some(healthy(3));
+        let data = s.status_data(true);
+        assert_eq!(data["reason"], serde_json::Value::Null);
+        assert_eq!(data["last_error"], serde_json::Value::Null);
+        assert_eq!(data["record_count"], 3);
+    }
+
+    // Keeper answers an application whose shares were all removed with
+    // success and an empty list: "connected", but it can read nothing.
+    #[test]
+    fn zero_shared_records_reports_no_records() {
+        let s = session();
+        *s.health.lock().unwrap() = Some(healthy(0));
+        assert_eq!(s.status_data(true)["reason"], "no_records");
+    }
+
+    #[test]
+    fn an_unknown_record_count_is_not_no_records() {
+        let s = session();
+        *s.health.lock().unwrap() = Some(KeeperSecurityHealth::default());
+        assert_eq!(s.status_data(true)["reason"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn access_denied_reports_the_reason_and_drops_cached_values() {
+        let s = session();
+        *s.last_ok.lock().unwrap() = Some(Instant::now());
+        s.ref_cache.insert(
+            "keeper://uid/field/password".into(),
+            CachedRef {
+                value: Some("hunter2".into()),
+                expires_at: Instant::now() + RESOLVE_CACHE_TTL,
+            },
+        );
+
+        s.note_connection_failure(&KeeperSecurityError::AccessDenied("denied".into()));
+
+        let data = s.status_data(false);
+        assert_eq!(data["reason"], "connection_failed");
+        assert_eq!(data["last_error"], "denied");
+        assert!(s.in_error_cooldown());
+        // No value resolved before the revocation is served after it, and the
+        // positive status cache no longer vouches for the connection.
+        assert!(s.ref_cache.is_empty());
+        assert!(s.last_ok.lock().unwrap().is_none());
+    }
+
+    // Any failed connectivity check reads the same, whatever the cause: an
+    // outage, a throttle, or the internal API being down.
+    #[test]
+    fn any_failed_check_reports_connection_failed() {
+        let s = session();
+        s.note_connection_failure(&KeeperSecurityError::Transient("timed out".into()));
+        let data = s.status_data(false);
+        assert_eq!(data["reason"], "connection_failed");
+        assert_eq!(data["last_error"], "timed out");
+    }
+
+    #[test]
+    fn a_call_keeper_accepts_clears_access_denied() {
+        let s = session();
+        s.mark_access_denied("denied");
+        s.mark_reachable();
+        let data = s.status_data(true);
+        assert_eq!(data["reason"], serde_json::Value::Null);
+        assert_eq!(data["last_error"], serde_json::Value::Null);
+    }
+
+    // One broken reference is not a broken connection: it is reported on its
+    // own, and leaves the connection's error and cooldown alone.
+    #[test]
+    fn a_reference_failure_is_reported_without_failing_the_connection() {
+        let s = session();
+        s.note_connection_failure(&KeeperSecurityError::BadRequest("bad ref".into()));
+        record_resolve_error(&s, "keeper://uid/field/x", "no such field");
+
+        let data = s.status_data(true);
+        assert_eq!(data["last_error"], serde_json::Value::Null);
+        assert!(!s.in_error_cooldown());
+        assert_eq!(
+            data["resolve_error"],
+            json!({ "ref": "keeper://uid/field/x", "message": "no such field" })
+        );
+    }
+
+    #[test]
+    fn a_picker_access_denied_is_recorded_and_returned_as_forbidden() {
+        let s = session();
+        let err = picker_outcome(&s, Err(KeeperSecurityError::AccessDenied("denied".into())))
+            .unwrap_err();
+        assert!(matches!(err, VaultError::Forbidden(m) if m == "denied"));
+        assert!(s.is_access_denied());
     }
 
     // ── Cross-instance revocation, over a real Postgres ─────────────────

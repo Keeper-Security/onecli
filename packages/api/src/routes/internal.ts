@@ -109,8 +109,8 @@ export const internalRoutes = () => {
       keepersecurityBase,
       await c.req.json().catch(() => ({})),
     );
-    await keepersecurityValidateConfig(config);
-    return c.json({ valid: true });
+    const health = await keepersecurityValidateConfig(config);
+    return c.json({ valid: true, ...health });
   });
 
   app.post("/keepersecurity/resolve", async (c) => {

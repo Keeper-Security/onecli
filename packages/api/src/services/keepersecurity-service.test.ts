@@ -12,9 +12,11 @@ const sdk = vi.hoisted(() => ({
 vi.mock("@keeper-security/secrets-manager-core", () => sdk);
 
 import {
+  accessDeniedMessage,
   bindOneTimeToken,
   escapeNotation,
   getRecordFields,
+  keeperFailure,
   listRecordFields,
   listRecords,
   resolveSecret,
@@ -131,6 +133,15 @@ describe("resolveSecret", () => {
     expect(err.message).toContain("no fields matching");
   });
 
+  it("maps access_denied to FORBIDDEN", async () => {
+    sdk.getNotationResults.mockRejectedValue(new Error(ACCESS_DENIED_BODY));
+    const err = await rejection(resolveSecret(CONFIG_JSON, REF));
+    expect(err.code).toBe("FORBIDDEN");
+    expect(err.message).toContain(
+      "Unable to validate Keeper application access",
+    );
+  });
+
   it("never puts the resolved value in an error", async () => {
     sdk.getNotationResults.mockRejectedValue(new Error("boom"));
     const err = await rejection(resolveSecret(CONFIG_JSON, REF));
@@ -138,16 +149,104 @@ describe("resolveSecret", () => {
   });
 });
 
+// What the SDK throws when Keeper refuses the application: its error body,
+// verbatim, as the Error message.
+const ACCESS_DENIED_BODY = JSON.stringify({
+  path: "https://keepersecurity.com/api/rest/sm/v1/get_secret, POST",
+  additional_info: "",
+  location: "default exception manager - api validation exception",
+  error: "access_denied",
+  message: "Unable to validate Keeper application access",
+});
+
+describe("keeperFailure", () => {
+  it("reads the code and message out of a Keeper error body", () => {
+    expect(keeperFailure(new Error(ACCESS_DENIED_BODY))).toEqual({
+      code: "access_denied",
+      message: "Unable to validate Keeper application access",
+    });
+  });
+
+  it("prefers result_code, the newer field", () => {
+    const body = JSON.stringify({ result_code: "throttled", error: "x" });
+    expect(keeperFailure(new Error(body)).code).toBe("throttled");
+  });
+
+  it("falls back to the code when there is no message", () => {
+    expect(
+      keeperFailure(new Error(JSON.stringify({ error: "invalid_client" }))),
+    ).toEqual({ code: "invalid_client", message: "invalid_client" });
+  });
+
+  it.each([
+    ["plain text", "socket hang up"],
+    ["a JSON array", "[1,2]"],
+    // The SDK truncates error bodies at 1000 bytes, which can cut the JSON.
+    ["truncated JSON", '{"error":"access_den'],
+  ])("passes %s through as the message", (_name, text) => {
+    expect(keeperFailure(new Error(text))).toEqual({ message: text });
+  });
+});
+
 describe("validateConfig", () => {
-  it("passes when Keeper accepts the config", async () => {
-    sdk.getSecrets.mockResolvedValue({ records: [] });
-    await expect(validateConfig(CONFIG_JSON)).resolves.toBeUndefined();
+  it("reports how many records the application can read", async () => {
+    sdk.getSecrets.mockResolvedValue({
+      // The same record shared directly and via a folder counts once.
+      records: [{ recordUid: "a" }, { recordUid: "b" }, { recordUid: "a" }],
+    });
+    await expect(validateConfig(CONFIG_JSON)).resolves.toEqual({
+      recordCount: 2,
+    });
     expect(sdk.getSecrets).toHaveBeenCalledWith({
       storage: { json: CONFIG_JSON },
     });
   });
 
-  it("maps a Keeper failure to BAD_REQUEST", async () => {
+  // Keeper answers an application whose shares were removed with success and
+  // nothing in it, not an error.
+  it("reports zero records when nothing is shared", async () => {
+    sdk.getSecrets.mockResolvedValue({ records: [] });
+    await expect(validateConfig(CONFIG_JSON)).resolves.toEqual({
+      recordCount: 0,
+    });
+  });
+
+  it("passes on Keeper's access expiry and warnings", async () => {
+    sdk.getSecrets.mockResolvedValue({
+      records: [{ recordUid: "a" }],
+      expiresOn: new Date("2026-12-01T00:00:00Z"),
+      warnings: ["share expires soon"],
+    });
+    await expect(validateConfig(CONFIG_JSON)).resolves.toEqual({
+      recordCount: 1,
+      expiresOn: "2026-12-01T00:00:00.000Z",
+      warnings: ["share expires soon"],
+    });
+  });
+
+  // Keeper does not say why it refused, so the message passes on what it did
+  // say rather than naming a cause.
+  it("maps access_denied to FORBIDDEN, passing on Keeper's message", async () => {
+    sdk.getSecrets.mockRejectedValue(new Error(ACCESS_DENIED_BODY));
+    const err = await rejection(validateConfig(CONFIG_JSON));
+    expect(err.code).toBe("FORBIDDEN");
+    expect(err.message).toBe(
+      accessDeniedMessage("Unable to validate Keeper application access"),
+    );
+    expect(err.message).not.toContain("{");
+    expect(err.message).not.toMatch(/revoked/);
+  });
+
+  it("maps any other Keeper failure to BAD_REQUEST, with Keeper's message only", async () => {
+    sdk.getSecrets.mockRejectedValue(
+      new Error(JSON.stringify({ error: "bad_thing", message: "Nope" })),
+    );
+    const err = await rejection(validateConfig(CONFIG_JSON));
+    expect(err.code).toBe("BAD_REQUEST");
+    expect(err.message).toBe("keepersecurity config validation failed: Nope");
+  });
+
+  it("keeps a plain-text failure's text", async () => {
     sdk.getSecrets.mockRejectedValue(new Error("access denied"));
     const err = await rejection(validateConfig(CONFIG_JSON));
     expect(err.code).toBe("BAD_REQUEST");
