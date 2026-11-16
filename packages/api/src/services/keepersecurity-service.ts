@@ -85,9 +85,6 @@ const keeperError = (
     : new ServiceError("BAD_REQUEST", `${prefix}: ${failure.message}`);
 };
 
-/** A one-time token looks like `US:` / `EU:` followed by url-safe base64. */
-const ONE_TIME_TOKEN = /^[A-Za-z]{2,}:[\w-]+$/;
-
 /** Keys every usable KSM config carries (the rest are optional / SDK-managed). */
 const REQUIRED_CONFIG_KEYS = [
   "hostname",
@@ -96,6 +93,13 @@ const REQUIRED_CONFIG_KEYS = [
   "appKey",
 ] as const;
 
+/**
+ * How a pasted KSM config is encoded, as the user chose it in the connect
+ * form. Never inferred from the text.
+ */
+export const KSM_CONFIG_FORMATS = ["json", "base64"] as const;
+export type KsmConfigFormat = (typeof KSM_CONFIG_FORMATS)[number];
+
 const badConfig = (reason: string): ServiceError =>
   new ServiceError(
     "BAD_REQUEST",
@@ -103,39 +107,63 @@ const badConfig = (reason: string): ServiceError =>
   );
 
 /**
- * Accepts the KSM config as raw JSON or base64-encoded JSON, and checks it has
- * the keys the SDK needs so a wrong paste fails here with a readable reason
- * instead of deep inside the SDK.
+ * Parse `json` as a KSM config object and check it has the keys the SDK
+ * needs, so a wrong paste fails with a readable reason instead of deep inside
+ * the SDK. `notJson` is the reason given when it doesn't parse.
  */
-const toStorage = (config: string): KeyValueStorage => {
-  const trimmed = config.trim();
-  if (ONE_TIME_TOKEN.test(trimmed)) {
-    throw badConfig(
-      "this looks like a one-time token, not a configuration; connect with a one-time token instead",
-    );
-  }
-
-  const json = trimmed.startsWith("{")
-    ? trimmed
-    : Buffer.from(trimmed, "base64").toString("utf8");
-
+const parseConfigObject = (
+  json: string,
+  notJson: string,
+): Record<string, unknown> => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
   } catch {
-    throw badConfig("expected JSON or base64-encoded JSON");
+    throw badConfig(notJson);
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw badConfig("expected a JSON object");
   }
+  const record = parsed as Record<string, unknown>;
   const missing = REQUIRED_CONFIG_KEYS.filter(
-    (k) => typeof (parsed as Record<string, unknown>)[k] !== "string",
+    (k) => typeof record[k] !== "string",
   );
   if (missing.length > 0) {
     throw badConfig(`missing ${missing.join(", ")}`);
   }
+  return record;
+};
 
-  return loadJsonConfig(json);
+/**
+ * Decode a pasted config in the format the user chose into the one form the
+ * rest of this service works with: a JSON object string. Done once, at pair
+ * time; the gateway stores the result, so later calls never decode or guess.
+ */
+export const normalizeConfig = (
+  config: string,
+  format: KsmConfigFormat,
+): string => {
+  const trimmed = config.trim();
+  const record =
+    format === "base64"
+      ? parseConfigObject(
+          Buffer.from(trimmed, "base64").toString("utf8"),
+          "expected a base64-encoded JSON configuration",
+        )
+      : parseConfigObject(trimmed, "expected a JSON configuration");
+  return JSON.stringify(record);
+};
+
+/**
+ * SDK storage for a config as the gateway stores it: the JSON produced at pair
+ * time (by {@link normalizeConfig}, or by binding a one-time token).
+ */
+const toStorage = (config: string): KeyValueStorage => {
+  parseConfigObject(
+    config,
+    "the stored configuration is not JSON; disconnect and connect again",
+  );
+  return loadJsonConfig(config);
 };
 
 /**

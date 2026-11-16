@@ -144,6 +144,29 @@ pub async fn validate(config: &str) -> Result<KeeperSecurityHealth, KeeperSecuri
         .map_err(|e| KeeperSecurityError::Transient(format!("invalid validate response: {e}")))
 }
 
+/// Validate a config pasted at pair time, decoded in the format the user chose
+/// (`"json"` or `"base64"`), and return it in the form the gateway stores (the
+/// JSON every later call sends).
+pub async fn validate_pasted(config: &str, format: &str) -> Result<String, KeeperSecurityError> {
+    let resp = send(
+        "validate",
+        &serde_json::json!({ "config": config, "format": format }),
+    )
+    .await?;
+    if !resp.status().is_success() {
+        return Err(classify(resp).await);
+    }
+    #[derive(Deserialize)]
+    struct PastedResponse {
+        config: String,
+    }
+    let body: PastedResponse = resp
+        .json()
+        .await
+        .map_err(|e| KeeperSecurityError::Transient(format!("invalid validate response: {e}")))?;
+    Ok(body.config)
+}
+
 /// Resolve a `keeper://` reference to its plaintext secret value.
 pub async fn resolve(
     config: &str,
