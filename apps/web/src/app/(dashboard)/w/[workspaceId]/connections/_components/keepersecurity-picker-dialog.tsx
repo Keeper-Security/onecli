@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import NextLink from "next/link";
+import { usePathname } from "next/navigation";
 import {
   AlertCircle,
   AtSign,
@@ -31,6 +33,7 @@ import {
 import { Input } from "@onecli/ui/components/input";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { cn } from "@onecli/ui/lib/utils";
+import { withWorkspacePrefix } from "@/lib/navigation";
 import {
   useKeeperSecurityFields,
   useKeeperSecurityRecords,
@@ -191,6 +194,22 @@ export const KeeperSecurityPickerDialog = ({
 
   const meta = STEP_META[step];
   const ready = !isLoading && !error;
+  const pathname = usePathname() ?? "";
+  const keeperPage = withWorkspacePrefix(
+    pathname,
+    "/connections/vaults/keepersecurity",
+  );
+  // A link to the connection page, where a revoked or unshared connection is
+  // explained and can be reconnected.
+  const checkConnection = (
+    <NextLink
+      href={keeperPage}
+      onClick={() => onOpenChange(false)}
+      className="text-foreground mt-1.5 block w-fit text-xs underline underline-offset-2 hover:no-underline"
+    >
+      Check the Keeper connection
+    </NextLink>
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -260,11 +279,14 @@ export const KeeperSecurityPickerDialog = ({
           ) : error ? (
             <div className="text-destructive flex items-start gap-2 px-3 py-8 text-sm">
               <AlertCircle className="mt-0.5 size-4 shrink-0" />
-              <span>
-                {error instanceof Error
-                  ? error.message
-                  : "Couldn’t reach Keeper."}
-              </span>
+              <div>
+                <span>
+                  {error instanceof Error
+                    ? error.message
+                    : "Couldn’t reach Keeper."}
+                </span>
+                {checkConnection}
+              </div>
             </div>
           ) : filtered.length === 0 ? (
             <p className="text-muted-foreground px-3 py-8 text-sm">
@@ -274,7 +296,7 @@ export const KeeperSecurityPickerDialog = ({
                   <span className="text-foreground font-mono">{query}</span>.
                 </>
               ) : (
-                meta.empty
+                <>{meta.empty}</>
               )}
             </p>
           ) : (

@@ -20,7 +20,9 @@ const h = vi.hoisted(() => ({
     loading: false,
     isPaired: false,
     isReady: false,
-    status: null as { status_data: { last_error: string | null } } | null,
+    status: null as {
+      status_data: import("@/hooks/use-vault-status").KeeperSecurityStatusData;
+    } | null,
     fetchStatus: vi.fn(),
   },
   pair: vi.fn<(method: string, input: string) => Promise<boolean>>(),
@@ -28,11 +30,13 @@ const h = vi.hoisted(() => ({
   disconnect: vi.fn(),
   disconnecting: false,
   providers: [] as string[],
+  statusOptions: [] as unknown[],
 }));
 
 vi.mock("@/hooks/use-vault-status", () => ({
-  useVaultStatus: (provider: string) => {
+  useVaultStatus: (provider: string, options?: unknown) => {
     h.providers.push(provider);
+    h.statusOptions.push(options);
     return h.status;
   },
   useVaultDisconnect: (_fetch: unknown, provider: string) => {
@@ -65,6 +69,7 @@ beforeEach(() => {
   h.pairing = false;
   h.disconnecting = false;
   h.providers = [];
+  h.statusOptions = [];
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -77,7 +82,7 @@ const TOKEN_LABEL = "One-time access token";
 
 const chooseMethod = async (option: string) => {
   await userEvent.click(
-    screen.getByRole("combobox", { name: "Connection method" }),
+    screen.getByRole("combobox", { name: "Configuration method" }),
   );
   await userEvent.click(await screen.findByRole("option", { name: option }));
 };
@@ -92,7 +97,7 @@ describe("KeeperSecuritySetup: not connected", () => {
     render(<KeeperSecuritySetup />);
     expect(screen.getAllByText(/^Connect Keeper/).length).toBeGreaterThan(0);
     expect(
-      screen.getByRole("combobox", { name: "Connection method" }),
+      screen.getByRole("combobox", { name: "Configuration method" }),
     ).toHaveTextContent("One-time access token");
     expect(screen.getByLabelText(TOKEN_LABEL)).toBeInTheDocument();
     expect(screen.getByPlaceholderText("US:...")).toBeInTheDocument();
@@ -101,7 +106,7 @@ describe("KeeperSecuritySetup: not connected", () => {
   it("lists the three connection methods", async () => {
     render(<KeeperSecuritySetup />);
     await userEvent.click(
-      screen.getByRole("combobox", { name: "Connection method" }),
+      screen.getByRole("combobox", { name: "Configuration method" }),
     );
     expect(
       (await screen.findAllByRole("option")).map((o) => o.textContent),
@@ -217,7 +222,7 @@ describe("KeeperSecuritySetup: connected", () => {
     render(<KeeperSecuritySetup />);
     expect(screen.getByText("Error")).toBeInTheDocument();
     expect(
-      screen.getByText("token decryption failed; re-pair to fix"),
+      screen.getByText("Details: token decryption failed; re-pair to fix"),
     ).toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: /Refresh status/ }),
@@ -245,5 +250,99 @@ describe("KeeperSecuritySetup: connected", () => {
     await userEvent.click(screen.getByRole("button", { name: /^Disconnect$/ }));
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(h.disconnect).not.toHaveBeenCalled();
+  });
+});
+
+describe("KeeperSecuritySetup: when Keeper access is lost", () => {
+  const paired = (status_data: Record<string, unknown>, isReady = true) => {
+    h.status.isPaired = true;
+    h.status.isReady = isReady;
+    h.status.status = {
+      status_data: { last_error: null, ...status_data },
+    };
+  };
+
+  // A revocation on Keeper's side must show without a reload.
+  it("keeps its status fresh", () => {
+    render(<KeeperSecuritySetup />);
+    expect(h.statusOptions).toContainEqual({ autoRefresh: true });
+  });
+
+  // OneCLI can't tell an expired configuration from a revoked one from an
+  // outage, so every failure reads the same, keeps the detail, and points at
+  // disconnecting and connecting again.
+  it.each([
+    [
+      "Keeper refusing the application",
+      "Keeper refused OneCLI's Secrets Manager application: Unable to validate Keeper application access",
+    ],
+    ["Keeper being unreachable", "internal keepersecurity API unreachable"],
+  ])("handles %s generically", (_name, lastError) => {
+    paired({ reason: "connection_failed", last_error: lastError }, false);
+    render(<KeeperSecuritySetup />);
+
+    expect(screen.getByText("Can't connect")).toBeInTheDocument();
+    expect(
+      screen.getByText("OneCLI can't connect to Keeper."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /disconnect below and connect again with a new configuration/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(`Details: ${lastError}`)).toBeInTheDocument();
+    // The fix is the Disconnect card, not a second connect form.
+    expect(
+      screen.queryByLabelText("One-time access token"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^Disconnect$/ }),
+    ).toBeInTheDocument();
+  });
+
+  // A gateway from before `reason` existed reports only `last_error`.
+  it("treats a bare error the same way", () => {
+    paired({ last_error: "boom" }, false);
+    render(<KeeperSecuritySetup />);
+    expect(
+      screen.getByText("OneCLI can't connect to Keeper."),
+    ).toBeInTheDocument();
+  });
+
+  it("warns when nothing is shared with the application any more", () => {
+    paired({ reason: "no_records", record_count: 0 });
+    render(<KeeperSecuritySetup />);
+    expect(screen.getByText("No records shared")).toBeInTheDocument();
+    expect(
+      screen.getByText(/no records shared with OneCLI/),
+    ).toBeInTheDocument();
+    // Still connected: re-sharing in Keeper fixes it, no reconnect needed.
+  });
+
+  it("flags an access limit that has passed", () => {
+    paired({ expires_on: "2020-01-01T00:00:00.000Z" });
+    render(<KeeperSecuritySetup />);
+    expect(screen.getByText(/Keeper access expired on/)).toBeInTheDocument();
+  });
+
+  it("shows Keeper's own warnings", () => {
+    paired({ warnings: ["Share expires in 2 days"] });
+    render(<KeeperSecuritySetup />);
+    expect(
+      screen.getByText("Keeper: Share expires in 2 days"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a single reference that could not resolve, without failing the connection", () => {
+    paired({
+      resolve_error: {
+        ref: "keeper://uid/field/password",
+        message: "record not found",
+      },
+    });
+    render(<KeeperSecuritySetup />);
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("keeper://uid/field/password")).toBeInTheDocument();
+    expect(screen.getByText(/record not found/)).toBeInTheDocument();
   });
 });
