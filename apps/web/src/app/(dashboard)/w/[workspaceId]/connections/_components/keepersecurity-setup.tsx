@@ -29,6 +29,13 @@ import {
 import { Badge } from "@onecli/ui/components/badge";
 import { Button } from "@onecli/ui/components/button";
 import { Label } from "@onecli/ui/components/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@onecli/ui/components/select";
 import { Skeleton } from "@onecli/ui/components/skeleton";
 import { SecretInput } from "@/components/secret-input";
 import {
@@ -36,7 +43,41 @@ import {
   useVaultDisconnect,
   type KeeperSecurityStatusData,
 } from "@/hooks/use-vault-status";
-import { useKeeperSecurityPair } from "@/hooks/use-keepersecurity";
+import {
+  useKeeperSecurityPair,
+  type KeeperSecurityPairMethod,
+} from "@/hooks/use-keepersecurity";
+
+/** What the form shows for each connection method. Order = dropdown order. */
+const PAIR_METHODS: {
+  value: KeeperSecurityPairMethod;
+  option: string;
+  label: string;
+  placeholder: string;
+  help: string;
+}[] = [
+  {
+    value: "one_time_token",
+    option: "One-time access token",
+    label: "One-time access token",
+    placeholder: "US:...",
+    help: "An Secrets Manager configuration as a one-time access token. The token is used once; only the resulting configuration is stored, encrypted.",
+  },
+  {
+    value: "base64_config",
+    option: "Base64 string",
+    label: "Base64 configuration",
+    placeholder: "eyJob3N0bmFtZSI6...",
+    help: "An Secrets Manager configuration as a base64 string. It is stored encrypted.",
+  },
+  {
+    value: "json_config",
+    option: "JSON configuration",
+    label: "JSON configuration",
+    placeholder: '{"hostname": "...", "clientId": "...", ...}',
+    help: "An Secrets Manager configuration as JSON. It is stored encrypted.",
+  },
+];
 
 export const KeeperSecuritySetup = () => {
   const { status, loading, isPaired, isReady, fetchStatus } =
@@ -46,11 +87,15 @@ export const KeeperSecuritySetup = () => {
     fetchStatus,
     "keepersecurity",
   );
-  const [token, setToken] = useState("");
+  const [method, setMethod] =
+    useState<KeeperSecurityPairMethod>("one_time_token");
+  const [input, setInput] = useState("");
+  const selected =
+    PAIR_METHODS.find((m) => m.value === method) ?? PAIR_METHODS[0]!;
 
   const handlePair = async () => {
-    const success = await pair(token);
-    if (success) setToken("");
+    const success = await pair(method, input);
+    if (success) setInput("");
   };
 
   if (loading) {
@@ -167,8 +212,8 @@ export const KeeperSecuritySetup = () => {
       <CardHeader>
         <CardTitle>Connect Keeper Security</CardTitle>
         <CardDescription>
-          Paste a one-time token or a Secrets Manager configuration to resolve
-          secrets on-demand.{" "}
+          Connect with a one-time access token or an existing Secrets Manager
+          configuration to resolve secrets on-demand.{" "}
           {/* TODO: Add a link of keepersecurity onecli gitbook docs link below */}
           <a
             href="https://docs.keeper.io/keeperpam/secrets-manager/integrations"
@@ -183,25 +228,37 @@ export const KeeperSecuritySetup = () => {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-2">
-          <Label htmlFor="keepersecurity-token">
-            One-time token or configuration
-          </Label>
+          <Label htmlFor="keepersecurity-method">Configuration method</Label>
+          <Select
+            value={method}
+            onValueChange={(v) => setMethod(v as KeeperSecurityPairMethod)}
+          >
+            <SelectTrigger id="keepersecurity-method" className="w-64">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAIR_METHODS.map((m) => (
+                <SelectItem key={m.value} value={m.value}>
+                  {m.option}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="keepersecurity-input">{selected.label}</Label>
           <SecretInput
-            id="keepersecurity-token"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            placeholder="US:... or a base64 / JSON config"
+            id="keepersecurity-input"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={selected.placeholder}
           />
-          <p className="text-muted-foreground text-xs">
-            Create a Secrets Manager application in Keeper, share the records
-            you need with it, and generate a one-time token. The token is used
-            once; only the resulting configuration is stored, encrypted.
-          </p>
+          <p className="text-muted-foreground text-xs">{selected.help}</p>
         </div>
         <Button
           onClick={handlePair}
           loading={pairing}
-          disabled={!token.trim()}
+          disabled={!input.trim()}
           className="w-fit"
         >
           <LinkIcon className="size-3.5" />

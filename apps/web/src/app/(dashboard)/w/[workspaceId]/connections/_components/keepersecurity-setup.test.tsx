@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { KeeperSecuritySetup } from "./keepersecurity-setup";
 
 // The connect/manage page for Keeper. The unit is what the page shows for each
@@ -15,7 +23,7 @@ const h = vi.hoisted(() => ({
     status: null as { status_data: { last_error: string | null } } | null,
     fetchStatus: vi.fn(),
   },
-  pair: vi.fn<(input: string) => Promise<boolean>>(),
+  pair: vi.fn<(method: string, input: string) => Promise<boolean>>(),
   pairing: false,
   disconnect: vi.fn(),
   disconnecting: false,
@@ -35,6 +43,15 @@ vi.mock("@/hooks/use-vault-status", () => ({
 vi.mock("@/hooks/use-keepersecurity", () => ({
   useKeeperSecurityPair: () => ({ pair: h.pair, pairing: h.pairing }),
 }));
+
+// Radix's Select drives its listbox through pointer-capture and scroll APIs
+// jsdom does not implement.
+beforeAll(() => {
+  Element.prototype.hasPointerCapture ??= () => false;
+  Element.prototype.setPointerCapture ??= () => {};
+  Element.prototype.releasePointerCapture ??= () => {};
+  Element.prototype.scrollIntoView ??= () => {};
+});
 
 beforeEach(() => {
   h.status = {
@@ -56,48 +73,83 @@ const connectButton = () =>
     name: /^Connect Keeper|Connecting/,
   });
 
+const TOKEN_LABEL = "One-time access token";
+
+const chooseMethod = async (option: string) => {
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "Connection method" }),
+  );
+  await userEvent.click(await screen.findByRole("option", { name: option }));
+};
+
 describe("KeeperSecuritySetup: not connected", () => {
   it("talks to the Keeper provider, not another vault's", () => {
     render(<KeeperSecuritySetup />);
     expect(new Set(h.providers)).toEqual(new Set(["keepersecurity"]));
   });
 
-  it("offers a connect form for a one-time token or a configuration", () => {
+  it("offers a connect form, starting with the one-time access token method", () => {
     render(<KeeperSecuritySetup />);
     expect(screen.getAllByText(/^Connect Keeper/).length).toBeGreaterThan(0);
     expect(
-      screen.getByLabelText("One-time token or configuration"),
-    ).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/US:\.\.\./)).toBeInTheDocument();
+      screen.getByRole("combobox", { name: "Connection method" }),
+    ).toHaveTextContent("One-time access token");
+    expect(screen.getByLabelText(TOKEN_LABEL)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("US:...")).toBeInTheDocument();
+  });
+
+  it("lists the three connection methods", async () => {
+    render(<KeeperSecuritySetup />);
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "Connection method" }),
+    );
+    expect(
+      (await screen.findAllByRole("option")).map((o) => o.textContent),
+    ).toEqual(["One-time access token", "Base64 string", "JSON configuration"]);
   });
 
   it("keeps Connect off until something is entered", async () => {
     render(<KeeperSecuritySetup />);
     expect(connectButton()).toBeDisabled();
-    await userEvent.click(
-      screen.getByLabelText("One-time token or configuration"),
-    );
+    await userEvent.click(screen.getByLabelText(TOKEN_LABEL));
     await userEvent.paste("   ");
     expect(connectButton()).toBeDisabled();
     await userEvent.paste("US:abc");
     expect(connectButton()).toBeEnabled();
   });
 
-  it("hands the pasted text to pair, then clears the field", async () => {
+  it("hands the method and the pasted text to pair, then clears the field", async () => {
     render(<KeeperSecuritySetup />);
-    const field = screen.getByLabelText("One-time token or configuration");
+    const field = screen.getByLabelText(TOKEN_LABEL);
     await userEvent.click(field);
     await userEvent.paste("US:abc123");
     await userEvent.click(connectButton());
 
-    expect(h.pair).toHaveBeenCalledWith("US:abc123");
+    expect(h.pair).toHaveBeenCalledWith("one_time_token", "US:abc123");
     expect(field).toHaveValue("");
   });
+
+  it.each([
+    ["Base64 string", "Base64 configuration", "base64_config", "eyJhIjoiYiJ9"],
+    ["JSON configuration", "JSON configuration", "json_config", '{"a":"b"}'],
+  ])(
+    "uses the %s method once chosen",
+    async (option, fieldLabel, method, value) => {
+      render(<KeeperSecuritySetup />);
+      await chooseMethod(option);
+      const field = screen.getByLabelText(fieldLabel);
+      await userEvent.click(field);
+      await userEvent.paste(value);
+      await userEvent.click(connectButton());
+
+      expect(h.pair).toHaveBeenCalledWith(method, value);
+    },
+  );
 
   it("keeps what was pasted when pairing fails, so it can be corrected", async () => {
     h.pair.mockResolvedValue(false);
     render(<KeeperSecuritySetup />);
-    const field = screen.getByLabelText("One-time token or configuration");
+    const field = screen.getByLabelText(TOKEN_LABEL);
     await userEvent.click(field);
     await userEvent.paste("US:abc123");
     await userEvent.click(connectButton());
@@ -108,9 +160,10 @@ describe("KeeperSecuritySetup: not connected", () => {
 
   it("masks the pasted credential", () => {
     render(<KeeperSecuritySetup />);
-    expect(
-      screen.getByLabelText("One-time token or configuration"),
-    ).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText(TOKEN_LABEL)).toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 
   it("explains that the token is used once and only the configuration is stored", () => {
@@ -130,9 +183,7 @@ describe("KeeperSecuritySetup: not connected", () => {
     h.status.loading = true;
     render(<KeeperSecuritySetup />);
     expect(screen.queryByText(/^Connect Keeper/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByLabelText("One-time token or configuration"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(TOKEN_LABEL)).not.toBeInTheDocument();
   });
 });
 
@@ -145,9 +196,7 @@ describe("KeeperSecuritySetup: connected", () => {
   it("shows Connected and no connect form", () => {
     render(<KeeperSecuritySetup />);
     expect(screen.getByText("Connected")).toBeInTheDocument();
-    expect(
-      screen.queryByLabelText("One-time token or configuration"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(TOKEN_LABEL)).not.toBeInTheDocument();
   });
 
   it("tells the user how to use the connection", () => {
