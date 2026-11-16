@@ -290,6 +290,15 @@ impl GatewayServer {
                 "/v1/vault/onepassword/items/{vaultId}/{itemId}/fields",
                 axum::routing::get(vault_api::vault_op_fields),
             )
+            // Keeper value picker (browse records → fields)
+            .route(
+                "/v1/vault/keepersecurity/records",
+                axum::routing::get(vault_api::vault_keepersecurity_records),
+            )
+            .route(
+                "/v1/vault/keepersecurity/records/{recordUid}/fields",
+                axum::routing::get(vault_api::vault_keepersecurity_fields),
+            )
             .route(
                 "/v1/cache/invalidate",
                 axum::routing::post(invalidate_cache),

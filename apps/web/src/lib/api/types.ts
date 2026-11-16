@@ -347,6 +347,7 @@ export interface CreateSecretInput {
   valueSource?: "inline" | "onepassword" | "keepersecurity";
   opRef?: string;
   keepersecurityRef?: string;
+  keepersecurityDisplay?: { record: string; field: string; folder?: string };
   opDisplay?: { vault: string; item: string; field: string };
   hostPattern: string;
   pathPattern?: string;

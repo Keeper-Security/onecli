@@ -12,6 +12,8 @@ vi.hoisted(() => {
 
 const keepersecurity = vi.hoisted(() => ({
   bindOneTimeToken: vi.fn(),
+  getRecordFields: vi.fn(),
+  listRecords: vi.fn(),
   resolveSecret: vi.fn(),
   validateConfig: vi.fn(),
 }));
@@ -45,7 +47,7 @@ const post = (path: string, body: unknown, secret = "test-gateway-secret") =>
 beforeEach(() => vi.clearAllMocks());
 
 describe("internal Keeper routes: authentication", () => {
-  it.each(["bind", "validate", "resolve"])(
+  it.each(["bind", "validate", "resolve", "list-records", "list-fields"])(
     "%s rejects a missing gateway secret",
     async (route) => {
       const res = await post(
@@ -57,7 +59,7 @@ describe("internal Keeper routes: authentication", () => {
     },
   );
 
-  it.each(["bind", "validate", "resolve"])(
+  it.each(["bind", "validate", "resolve", "list-records", "list-fields"])(
     "%s rejects a wrong gateway secret",
     async (route) => {
       const res = await post(
@@ -183,5 +185,62 @@ describe("POST /keepersecurity/resolve", () => {
       keepersecurity_ref: REF,
     });
     expect(await res.text()).not.toContain("SECRET-CONFIG-BLOB");
+  });
+});
+
+describe("POST /keepersecurity/list-records", () => {
+  it("returns the records under `records`", async () => {
+    const records = [{ uid: "u1", title: "GitHub", type: "login" }];
+    keepersecurity.listRecords.mockResolvedValue(records);
+    const res = await post("list-records", { config: "cfg" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ records });
+    expect(keepersecurity.listRecords).toHaveBeenCalledWith("cfg");
+  });
+
+  it("rejects a missing config", async () => {
+    expect((await post("list-records", {})).status).toBe(400);
+    expect(keepersecurity.listRecords).not.toHaveBeenCalled();
+  });
+
+  it("maps a Keeper failure to 400", async () => {
+    keepersecurity.listRecords.mockRejectedValue(
+      new ServiceError("BAD_REQUEST", "denied"),
+    );
+    expect((await post("list-records", { config: "cfg" })).status).toBe(400);
+  });
+});
+
+describe("POST /keepersecurity/list-fields", () => {
+  it("returns the fields under `fields`", async () => {
+    const fields = [
+      {
+        ref: "keeper://u1/field/password",
+        label: "Password",
+        fieldType: "password",
+      },
+    ];
+    keepersecurity.getRecordFields.mockResolvedValue(fields);
+    const res = await post("list-fields", { config: "cfg", recordUid: "u1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ fields });
+    expect(keepersecurity.getRecordFields).toHaveBeenCalledWith("cfg", "u1");
+  });
+
+  it.each([
+    ["no record", { config: "cfg" }],
+    ["an empty record", { config: "cfg", recordUid: "" }],
+    ["no config", { recordUid: "u1" }],
+  ])("rejects %s", async (_name, body) => {
+    expect((await post("list-fields", body)).status).toBe(400);
+    expect(keepersecurity.getRecordFields).not.toHaveBeenCalled();
+  });
+
+  it("answers an unshared record with 404", async () => {
+    keepersecurity.getRecordFields.mockRejectedValue(
+      new ServiceError("NOT_FOUND", "not shared"),
+    );
+    const res = await post("list-fields", { config: "cfg", recordUid: "u1" });
+    expect(res.status).toBe(404);
   });
 });

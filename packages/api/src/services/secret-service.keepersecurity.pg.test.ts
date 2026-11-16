@@ -220,6 +220,57 @@ describe.skipIf(!PROOF_URL)(
       });
     });
 
+    describe("picker labels", () => {
+      const DISPLAY = { record: "GitHub", field: "Password", folder: "Shared" };
+
+      it("stores the picked record/field labels alongside the reference", async () => {
+        const created = await keepersecuritySecret({
+          keepersecurityDisplay: DISPLAY,
+        });
+        expect((await row(created.id)).metadata).toEqual({
+          keepersecurityDisplay: DISPLAY,
+        });
+      });
+
+      it("keeps an LLM key in API-key mode next to the labels", async () => {
+        const created = await keepersecuritySecret({
+          type: "anthropic",
+          keepersecurityDisplay: DISPLAY,
+        });
+        expect((await row(created.id)).metadata).toEqual({
+          authMode: "api-key",
+          keepersecurityDisplay: DISPLAY,
+        });
+      });
+
+      it("replaces the labels when a different field is picked", async () => {
+        const created = await keepersecuritySecret({
+          keepersecurityDisplay: DISPLAY,
+        });
+        const next = { record: "GitHub", field: "API Key" };
+        await secrets.updateSecret({ workspaceId: WORKSPACE }, created.id, {
+          valueSource: "keepersecurity",
+          keepersecurityRef:
+            "keeper://qnXEdBFVi2Gm1UFehAsjew/custom_field/API Key",
+          keepersecurityDisplay: next,
+        } as never);
+        expect((await row(created.id)).metadata).toEqual({
+          keepersecurityDisplay: next,
+        });
+      });
+
+      it("drops stale labels when the reference is typed by hand", async () => {
+        const created = await keepersecuritySecret({
+          keepersecurityDisplay: DISPLAY,
+        });
+        await secrets.updateSecret({ workspaceId: WORKSPACE }, created.id, {
+          valueSource: "keepersecurity",
+          keepersecurityRef: "keeper://AAAAAAAAAAAAAAAAAAAAAA/field/login",
+        } as never);
+        expect((await row(created.id)).metadata).toBeNull();
+      });
+    });
+
     describe("update: switching sources", () => {
       it("inline → Keeper clears the stored value", async () => {
         const inline = await secrets.createSecret({ workspaceId: WORKSPACE }, {
