@@ -11,7 +11,8 @@ import {
 
 // What matters here is the request body. A one-time token is single-use, so
 // sending one as a "config" (or the reverse) would either spend it for nothing
-// or fail late with a confusing error: the hook decides from the pasted text.
+// or fail late with a confusing error: the hook follows the method the user
+// chose and never guesses from the pasted text.
 vi.mock("@/lib/gateway-url", () => ({
   getGatewayApiUrl: () => "http://gw.test",
 }));
@@ -58,38 +59,75 @@ const pairHook = () => {
 describe("useKeeperSecurityPair", () => {
   it.each([
     "US:tpW8qZLAZklF_dfyYLtEr-6_JYLotWk-N5-zVhPq0DU",
-    "EU:abc123",
-    "AU:Zm9v-YmFy_",
     "GOV:abcDEF123",
-  ])("sends %s as a one-time token", async (token) => {
-    respond(200, { status: "paired" });
-    const { result } = pairHook();
-    await act(() => result.current.pair(token));
-    expect(lastCall().body).toEqual({ one_time_token: token });
-  });
+    // Not shaped like today's tokens: the chosen method decides, not a pattern.
+    "a-future-token-format",
+  ])(
+    "sends %s as a one-time token when that method is chosen",
+    async (token) => {
+      respond(200, { status: "paired" });
+      const { result } = pairHook();
+      await act(() => result.current.pair("one_time_token", token));
+      expect(lastCall().body).toEqual({ one_time_token: token });
+    },
+  );
 
-  it.each([
-    ["base64", "eyJob3N0bmFtZSI6ImtlZXBlcnNlY3VyaXR5LmNvbSJ9"],
-    ["JSON", '{"hostname":"keepersecurity.com","clientId":"c"}'],
-    ["JSON with a colon in a value", '{"a":"b"}'],
-  ])("sends %s as a config", async (_name, config) => {
+  it("sends a base64 string as a config", async () => {
+    const config = "eyJob3N0bmFtZSI6ImtlZXBlcnNlY3VyaXR5LmNvbSJ9";
     respond(200, { status: "paired" });
     const { result } = pairHook();
-    await act(() => result.current.pair(config));
+    await act(() => result.current.pair("base64_config", config));
     expect(lastCall().body).toEqual({ ksm_config: config });
   });
 
-  it("trims whitespace before deciding", async () => {
+  it("sends a JSON configuration as a config", async () => {
+    const config = '{"hostname":"keepersecurity.com","clientId":"c"}';
     respond(200, { status: "paired" });
     const { result } = pairHook();
-    await act(() => result.current.pair("  US:abc123 \n"));
+    await act(() => result.current.pair("json_config", config));
+    expect(lastCall().body).toEqual({ ksm_config: config });
+  });
+
+  // A config that happens to look like a token is still a config when the user
+  // says so; the server explains what is wrong with it.
+  it("never reinterprets a config as a token", async () => {
+    respond(400, { error: "invalid keepersecurity KSM config" });
+    const { result } = pairHook();
+    await act(() => result.current.pair("base64_config", "US:abc123"));
+    expect(lastCall().body).toEqual({ ksm_config: "US:abc123" });
+  });
+
+  it.each([
+    ["not JSON", "hostname=keepersecurity.com"],
+    ["a JSON array", '["a"]'],
+    ["a JSON string", '"abc"'],
+  ])(
+    "rejects %s for the JSON method without calling the gateway",
+    async (_name, text) => {
+      const { result } = pairHook();
+      let ok = true;
+      await act(async () => {
+        ok = await result.current.pair("json_config", text);
+      });
+      expect(ok).toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith(
+        "The configuration is not a valid JSON object",
+      );
+    },
+  );
+
+  it("trims whitespace before sending", async () => {
+    respond(200, { status: "paired" });
+    const { result } = pairHook();
+    await act(() => result.current.pair("one_time_token", "  US:abc123 \n"));
     expect(lastCall().body).toEqual({ one_time_token: "US:abc123" });
   });
 
   it("posts to the Keeper pair endpoint with the gateway's auth options", async () => {
     respond(200, { status: "paired" });
     const { result } = pairHook();
-    await act(() => result.current.pair("US:abc"));
+    await act(() => result.current.pair("one_time_token", "US:abc"));
     const { url, init } = lastCall();
     expect(url).toBe("http://gw.test/v1/vault/keepersecurity/pair");
     expect(init.method).toBe("POST");
@@ -105,7 +143,7 @@ describe("useKeeperSecurityPair", () => {
     const { result, fetchStatus } = pairHook();
     let ok = false;
     await act(async () => {
-      ok = await result.current.pair("US:abc");
+      ok = await result.current.pair("one_time_token", "US:abc");
     });
     expect(ok).toBe(true);
     expect(fetchStatus).toHaveBeenCalledOnce();
@@ -117,7 +155,7 @@ describe("useKeeperSecurityPair", () => {
     const { result, fetchStatus } = pairHook();
     let ok = true;
     await act(async () => {
-      ok = await result.current.pair("US:abc");
+      ok = await result.current.pair("one_time_token", "US:abc");
     });
     expect(ok).toBe(false);
     expect(fetchStatus).not.toHaveBeenCalled();
@@ -129,7 +167,7 @@ describe("useKeeperSecurityPair", () => {
   it("falls back to a generic message when the error has no body", async () => {
     fetchMock.mockResolvedValueOnce(new Response("", { status: 502 }));
     const { result } = pairHook();
-    await act(() => result.current.pair("US:abc"));
+    await act(() => result.current.pair("one_time_token", "US:abc"));
     expect(toast.error).toHaveBeenCalledWith("Pairing failed");
   });
 
@@ -138,7 +176,7 @@ describe("useKeeperSecurityPair", () => {
     const { result } = pairHook();
     let ok = true;
     await act(async () => {
-      ok = await result.current.pair("US:abc");
+      ok = await result.current.pair("one_time_token", "US:abc");
     });
     expect(ok).toBe(false);
     expect(toast.error).toHaveBeenCalledWith("Failed to connect to Keeper");
@@ -150,13 +188,24 @@ describe("useKeeperSecurityPair", () => {
       const { result } = pairHook();
       let ok = true;
       await act(async () => {
-        ok = await result.current.pair(blank);
+        ok = await result.current.pair("one_time_token", blank);
       });
       expect(ok).toBe(false);
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(toast.error).toHaveBeenCalledWith(
-        "Enter a one-time token or a KSM config",
-      );
+      expect(toast.error).toHaveBeenCalledWith("Enter a one-time access token");
+    },
+  );
+
+  it.each([
+    ["base64_config", "Enter a base64 configuration"],
+    ["json_config", "Enter a JSON configuration"],
+  ] as const)(
+    "names what is missing for the %s method",
+    async (method, message) => {
+      const { result } = pairHook();
+      await act(() => result.current.pair(method, "  "));
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith(message);
     },
   );
 
@@ -166,7 +215,7 @@ describe("useKeeperSecurityPair", () => {
     const { result } = pairHook();
     let pending!: Promise<boolean>;
     act(() => {
-      pending = result.current.pair("US:abc");
+      pending = result.current.pair("one_time_token", "US:abc");
     });
     await waitFor(() => expect(result.current.pairing).toBe(true));
     await act(async () => {

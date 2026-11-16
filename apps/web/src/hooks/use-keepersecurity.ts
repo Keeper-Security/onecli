@@ -14,27 +14,61 @@ const PROVIDER = "keepersecurity";
 // picker feels instant and doesn't re-hit Keeper on every reopen.
 const STALE_TIME = 60_000;
 
-/** A one-time token looks like `US:` / `EU:` followed by url-safe base64. */
-const ONE_TIME_TOKEN = /^[A-Za-z]{2,}:[\w-]+$/;
+/**
+ * How the user is connecting, chosen explicitly in the form.
+ */
+export type KeeperSecurityPairMethod =
+  | "one_time_token"
+  | "base64_config"
+  | "json_config";
+
+const EMPTY_INPUT_MESSAGE: Record<KeeperSecurityPairMethod, string> = {
+  one_time_token: "Enter a one-time access token",
+  base64_config: "Enter a base64 configuration",
+  json_config: "Enter a JSON configuration",
+};
+
+/** A JSON config must at least parse as an object; the server checks the keys. */
+const isJsonObject = (text: string): boolean => {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return (
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    );
+  } catch {
+    return false;
+  }
+};
+
+/** The `pair` body for a method: a token is bound server-side, a config is used as is. */
+const pairBody = (method: KeeperSecurityPairMethod, value: string) =>
+  method === "one_time_token"
+    ? { one_time_token: value }
+    : { ksm_config: value };
 
 /**
- * Pair with Keeper Secrets Manager. Accepts either a one-time token (bound to a
- * reusable config server-side; the token itself is never stored) or an existing
- * KSM config (base64 or JSON).
+ * Pair with Keeper Secrets Manager. Accepts either a one-time access token
+ * (bound to a reusable config server-side; the token itself is never stored)
+ * or an existing KSM config (base64 or JSON), as chosen by `method`.
  */
 export const useKeeperSecurityPair = (fetchStatus: () => Promise<void>) => {
   const [pairing, setPairing] = useState(false);
 
   const pair = useCallback(
-    async (input: string): Promise<boolean> => {
+    async (
+      method: KeeperSecurityPairMethod,
+      input: string,
+    ): Promise<boolean> => {
       const trimmed = input.trim();
       if (!trimmed) {
-        toast.error("Enter a one-time token or a KSM config");
+        toast.error(EMPTY_INPUT_MESSAGE[method]);
         return false;
       }
-      const body = ONE_TIME_TOKEN.test(trimmed)
-        ? { one_time_token: trimmed }
-        : { ksm_config: trimmed };
+      if (method === "json_config" && !isJsonObject(trimmed)) {
+        toast.error("The configuration is not a valid JSON object");
+        return false;
+      }
+      const body = pairBody(method, trimmed);
 
       setPairing(true);
       try {
