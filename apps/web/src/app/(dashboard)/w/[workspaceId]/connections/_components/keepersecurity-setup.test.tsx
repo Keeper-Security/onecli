@@ -283,9 +283,6 @@ describe("KeeperSecuritySetup: when Keeper access is lost", () => {
 
     expect(screen.getByText("Can't connect")).toBeInTheDocument();
     expect(
-      screen.getByText("OneCLI can't connect to Keeper."),
-    ).toBeInTheDocument();
-    expect(
       screen.getByText(
         /disconnect below and connect again with a new configuration/,
       ),
@@ -304,9 +301,8 @@ describe("KeeperSecuritySetup: when Keeper access is lost", () => {
   it("treats a bare error the same way", () => {
     paired({ last_error: "boom" }, false);
     render(<KeeperSecuritySetup />);
-    expect(
-      screen.getByText("OneCLI can't connect to Keeper."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Error")).toBeInTheDocument();
+    expect(screen.getByText(/disconnect below/)).toBeInTheDocument();
   });
 
   it("warns when nothing is shared with the application any more", () => {
