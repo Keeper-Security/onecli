@@ -269,9 +269,11 @@ export const KeeperSecuritySetup = () => {
               </Badge>
             </div>
             <CardDescription>
-              Pick Keeper as the value source when adding a secret and give it a{" "}
-              <code>keeper://</code> reference. The value is resolved on-demand;
-              nothing is stored on the server.
+              When adding a secret, pick Keeper Security as its value source and
+              choose a record field, or enter a <code>keeper://</code>{" "}
+              reference. OneCLI fetches the value from Keeper when a request
+              needs it. Only the reference and this connection&apos;s encrypted
+              configuration are stored; the secret value is never saved.
             </CardDescription>
           </CardHeader>
           {hasNotices && (

@@ -31,8 +31,8 @@ export default function KeeperSecurityPage() {
           </Badge>
         </div>
         <p className="text-muted-foreground text-sm">
-          Resolve secrets on-demand from Keeper Secrets Manager using a{" "}
-          <code>keeper://</code> reference. Nothing is stored on the server.
+          Resolve secrets on-demand from Keeper Secrets Manager. Nothing is
+          stored on the server.
         </p>
       </div>
 
