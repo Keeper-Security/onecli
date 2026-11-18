@@ -642,17 +642,18 @@ async fn live_check(session: &KeeperSecuritySession) -> bool {
             *session.last_ok.lock().expect("session lock poisoned") = Some(Instant::now());
             true
         }
-        Err(KeeperSecurityError::AccessDenied(msg)) => {
-            session.mark_access_denied(&msg);
-            false
-        }
-        // Any other failure of the connectivity check (an outage, or a config
-        // Keeper rejects) leaves the connection unusable for now: report it and
-        // back off.
         Err(e) => {
-            *session.last_error.lock().expect("session lock poisoned") = Some(e.to_string());
-            *session.error_until.lock().expect("session lock poisoned") =
-                Some(Instant::now() + ERROR_COOLDOWN);
+            // The check reads no reference, so a `NotFound`/`BadRequest` here
+            // (e.g. a config Keeper rejects) is a connection failure like any
+            // other: recorded through the same bookkeeping as the resolve and
+            // picker paths, so all three back off alike.
+            let e = match e {
+                KeeperSecurityError::NotFound(m) | KeeperSecurityError::BadRequest(m) => {
+                    KeeperSecurityError::Transient(m)
+                }
+                other => other,
+            };
+            session.note_connection_failure(&e);
             false
         }
     }
@@ -891,6 +892,17 @@ mod tests {
         let data = s.status_data(false);
         assert_eq!(data["reason"], "connection_failed");
         assert_eq!(data["last_error"], "timed out");
+    }
+
+    // `note_connection_failure` is what `live_check` records every failure
+    // through; a rejected config there arrives as `Transient`.
+    #[test]
+    fn a_connection_failure_backs_off_and_reports() {
+        let s = session();
+        s.note_connection_failure(&KeeperSecurityError::Transient("bad config".into()));
+        assert!(s.in_error_cooldown());
+        assert!(!s.is_access_denied());
+        assert_eq!(s.status_data(false)["last_error"], "bad config");
     }
 
     #[test]

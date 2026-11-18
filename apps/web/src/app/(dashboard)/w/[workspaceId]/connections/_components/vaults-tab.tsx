@@ -65,7 +65,7 @@ const VAULT_PROVIDERS: VaultProviderMeta[] = [
     provider: "keepersecurity",
     title: "Keeper Security",
     description:
-      "Resolve secrets from Keeper Security with a Secrets Manager application. The gateway fetches them at request time. Nothing is stored.",
+      "Resolve secrets from Keeper Security with a Secrets Manager application. The gateway fetches them at request time. Secret values are never stored.",
     iconSrc: "/icons/keeper-security.png",
     iconSize: 32,
     vaultPath: "/connections/vaults/keepersecurity",

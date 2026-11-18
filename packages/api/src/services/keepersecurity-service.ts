@@ -75,6 +75,8 @@ const keeperError = (
   err: unknown,
   logFields: Record<string, unknown> = {},
 ): ServiceError => {
+  // Already classified (a throttle, see `sdkOptions`): keep its code.
+  if (err instanceof ServiceError) return err;
   const failure = keeperFailure(err);
   logger.warn(
     { ...logFields, code: failure.code, err: failure.message },
@@ -84,6 +86,36 @@ const keeperError = (
     ? new ServiceError("FORBIDDEN", accessDeniedMessage(failure.message))
     : new ServiceError("BAD_REQUEST", `${prefix}: ${failure.message}`);
 };
+
+/**
+ * Per-request limit for calls the gateway waits on (it gives up after 15s). A
+ * call can make two exchanges with Keeper (e.g. a server-key rotation retry),
+ * so each stays under half of that; past it the SDK aborts and the gateway
+ * hears a real failure instead of timing out while this keeps going.
+ */
+const SDK_REQUEST_TIMEOUT_MS = 7_000;
+/** Binding registers a new client, which can be slow; the gateway waits 45s. */
+const SDK_BIND_TIMEOUT_MS = 20_000;
+
+/**
+ * When Keeper rate-limits, the SDK by default sleeps and retries up to 5
+ * times, 11s to 176s apart, long after the gateway has given up on the call.
+ * Fail fast instead: the gateway backs off (a 429 reads as transient) and
+ * retries on its own schedule.
+ */
+const failOnThrottle = (): Promise<void> =>
+  Promise.reject(
+    new ServiceError(
+      "RATE_LIMITED",
+      "Keeper is rate-limiting requests from OneCLI; try again shortly",
+    ),
+  );
+
+/** SDK options for a call: the storage, a bounded timeout, no throttle sleeps. */
+const sdkOptions = (
+  storage: KeyValueStorage,
+  requestTimeoutMs: number = SDK_REQUEST_TIMEOUT_MS,
+) => ({ storage, requestTimeoutMs, throttleSleep: failOnThrottle });
 
 /** Keys every usable KSM config carries (the rest are optional / SDK-managed). */
 const REQUIRED_CONFIG_KEYS = [
@@ -178,9 +210,11 @@ export const bindOneTimeToken = async (token: string): Promise<string> => {
     const storage = inMemoryStorage(store);
     await initializeStorage(storage, token.trim());
     // First call performs the binding; it also proves the app can read records.
-    await getSecrets({ storage });
+    await getSecrets(sdkOptions(storage, SDK_BIND_TIMEOUT_MS));
     return JSON.stringify(store);
   } catch (err) {
+    // A throttle (see `sdkOptions`) is not a bad token: keep its code.
+    if (err instanceof ServiceError) throw err;
     const failure = keeperFailure(err);
     logger.warn(
       { code: failure.code, err: failure.message },
@@ -214,7 +248,7 @@ export const validateConfig = async (
 ): Promise<KeeperSecurityHealth> => {
   const storage = toStorage(config);
   try {
-    const secrets = await getSecrets({ storage });
+    const secrets = await getSecrets(sdkOptions(storage));
     const uids = new Set((secrets.records ?? []).map((r) => r.recordUid));
     return {
       recordCount: uids.size,
@@ -235,7 +269,10 @@ export const resolveSecret = async (
 ): Promise<string> => {
   const storage = toStorage(config);
   try {
-    const results = await getNotationResults({ storage }, keepersecurityRef);
+    const results = await getNotationResults(
+      sdkOptions(storage),
+      keepersecurityRef,
+    );
     if (results.length === 0) throw new Error("no value found");
     // A multi-value field resolves to its first value.
     return String(results[0]);
@@ -406,8 +443,8 @@ export const listRecords = async (
     // Folder names are cosmetic; an app or SDK that cannot list folders still
     // gets a usable record list.
     const [secrets, folders] = await Promise.all([
-      getSecrets({ storage }),
-      getFolders({ storage }).catch((err: unknown) => {
+      getSecrets(sdkOptions(storage)),
+      getFolders(sdkOptions(storage)).catch((err: unknown) => {
         logger.warn(
           { err: errMessage(err) },
           "keepersecurity folder listing failed; showing records without folders",
@@ -445,7 +482,7 @@ export const getRecordFields = async (
   const storage = toStorage(config);
   let record: KeeperRecord | undefined;
   try {
-    const secrets = await getSecrets({ storage }, [recordUid]);
+    const secrets = await getSecrets(sdkOptions(storage), [recordUid]);
     record = secrets.records.find((r) => r.recordUid === recordUid);
   } catch (err) {
     throw keeperError("cannot read keepersecurity record", err, { recordUid });

@@ -144,7 +144,7 @@ describe("resolveSecret", () => {
     sdk.getNotationResults.mockResolvedValue(["hunter2"]);
     await expect(resolveSecret(CONFIG_JSON, REF)).resolves.toBe("hunter2");
     expect(sdk.getNotationResults).toHaveBeenCalledWith(
-      { storage: { json: CONFIG_JSON } },
+      expect.objectContaining({ storage: { json: CONFIG_JSON } }),
       REF,
     );
   });
@@ -240,9 +240,9 @@ describe("validateConfig", () => {
     await expect(validateConfig(CONFIG_JSON)).resolves.toEqual({
       recordCount: 2,
     });
-    expect(sdk.getSecrets).toHaveBeenCalledWith({
-      storage: { json: CONFIG_JSON },
-    });
+    expect(sdk.getSecrets).toHaveBeenCalledWith(
+      expect.objectContaining({ storage: { json: CONFIG_JSON } }),
+    );
   });
 
   // Keeper answers an application whose shares were removed with success and
@@ -321,9 +321,9 @@ describe("bindOneTimeToken", () => {
       { kind: "storage" },
       "US:abc123",
     );
-    expect(sdk.getSecrets).toHaveBeenCalledWith({
-      storage: { kind: "storage" },
-    });
+    expect(sdk.getSecrets).toHaveBeenCalledWith(
+      expect.objectContaining({ storage: { kind: "storage" } }),
+    );
     expect(JSON.parse(out)).toEqual(CONFIG);
   });
 
@@ -601,7 +601,7 @@ describe("getRecordFields", () => {
     });
     const fields = await getRecordFields(CONFIG_JSON, UID);
     expect(sdk.getSecrets).toHaveBeenCalledWith(
-      { storage: { json: CONFIG_JSON } },
+      expect.objectContaining({ storage: { json: CONFIG_JSON } }),
       [UID],
     );
     expect(fields.map((f) => f.ref)).toEqual([
@@ -613,5 +613,76 @@ describe("getRecordFields", () => {
     sdk.getSecrets.mockResolvedValue({ records: [] });
     const err = await rejection(getRecordFields(CONFIG_JSON, UID));
     expect(err.code).toBe("NOT_FOUND");
+  });
+});
+
+// The gateway gives up on a call after 15s. When Keeper rate-limits, the SDK
+// would by default sleep and retry for minutes, long after that; every SDK
+// call must instead be bounded and fail fast on a throttle.
+describe("SDK call limits", () => {
+  type SdkOptions = {
+    requestTimeoutMs?: number;
+    throttleSleep?: (ms: number) => Promise<void>;
+  };
+  const optionsOf = (mock: { mock: { calls: unknown[][] } }): SdkOptions =>
+    mock.mock.calls.at(-1)?.[0] as SdkOptions;
+
+  it.each([
+    [
+      "resolve",
+      () => {
+        sdk.getNotationResults.mockResolvedValue(["v"]);
+        return resolveSecret(CONFIG_JSON, REF);
+      },
+      () => optionsOf(sdk.getNotationResults),
+    ],
+    [
+      "validate",
+      () => {
+        sdk.getSecrets.mockResolvedValue({ records: [] });
+        return validateConfig(CONFIG_JSON);
+      },
+      () => optionsOf(sdk.getSecrets),
+    ],
+    [
+      "list records",
+      () => {
+        sdk.getSecrets.mockResolvedValue({ records: [] });
+        sdk.getFolders.mockResolvedValue([]);
+        return listRecords(CONFIG_JSON);
+      },
+      () => optionsOf(sdk.getSecrets),
+    ],
+  ] as const)(
+    "%s stays inside the gateway's wait and does not sleep on a throttle",
+    async (_name, call, options) => {
+      await call();
+      const opts = options();
+      expect(opts.requestTimeoutMs).toBeLessThan(15_000 / 2);
+      await expect(opts.throttleSleep?.(11_000)).rejects.toMatchObject({
+        code: "RATE_LIMITED",
+      });
+    },
+  );
+
+  // The SDK rejects with what throttleSleep rejects with.
+  it("reports a throttle as RATE_LIMITED, not as a bad reference", async () => {
+    sdk.getNotationResults.mockImplementation(async (opts: SdkOptions) => {
+      await opts.throttleSleep?.(11_000);
+      return ["unreachable"];
+    });
+    const err = await rejection(resolveSecret(CONFIG_JSON, REF));
+    expect(err.code).toBe("RATE_LIMITED");
+  });
+
+  it("does not report a throttle while binding as a used or expired token", async () => {
+    sdk.inMemoryStorage.mockReturnValue({ kind: "storage" });
+    sdk.getSecrets.mockImplementation(async (opts: SdkOptions) => {
+      await opts.throttleSleep?.(11_000);
+      return { records: [] };
+    });
+    const err = await rejection(bindOneTimeToken("US:abc"));
+    expect(err.code).toBe("RATE_LIMITED");
+    expect(err.message).not.toMatch(/already used/);
   });
 });
