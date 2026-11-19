@@ -103,17 +103,13 @@ describe("normalizeConfig", () => {
     expect(() => normalizeConfig(asBase64, "base64")).toThrow(/JSON object/);
   });
 
-  it.each(["hostname", "clientId", "privateKey", "appKey"])(
-    "rejects a config missing %s",
-    (key) => {
-      const rest = Object.fromEntries(
-        Object.entries(CONFIG).filter(([k]) => k !== key),
-      );
-      expect(() => normalizeConfig(JSON.stringify(rest), "json")).toThrow(
-        `missing ${key}`,
-      );
-    },
-  );
+  // Which keys a config needs is the SDK's to judge, when pairing validates
+  // it with Keeper; here it only has to be a JSON object.
+  it("does not check the config's keys", () => {
+    expect(JSON.parse(normalizeConfig('{"hostname":"h"}', "json"))).toEqual({
+      hostname: "h",
+    });
+  });
 });
 
 // Every SDK call reads the config the gateway stored: the JSON produced at
@@ -132,10 +128,12 @@ describe("stored config", () => {
     expect(sdk.getNotationResults).not.toHaveBeenCalled();
   });
 
-  it("must have the keys the SDK needs", async () => {
+  it("is handed to the SDK, which judges its keys", async () => {
+    sdk.getNotationResults.mockRejectedValue(new Error("missing clientId"));
     const err = await rejection(resolveSecret('{"hostname":"h"}', REF));
+    expect(err.code).toBe("BAD_REQUEST");
     expect(err.message).toContain("missing clientId");
-    expect(sdk.getNotationResults).not.toHaveBeenCalled();
+    expect(sdk.loadJsonConfig).toHaveBeenCalledWith('{"hostname":"h"}');
   });
 });
 

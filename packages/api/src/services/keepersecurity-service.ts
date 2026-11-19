@@ -116,14 +116,6 @@ const sdkOptions = (
   requestTimeoutMs: number = SDK_REQUEST_TIMEOUT_MS,
 ) => ({ storage, requestTimeoutMs, throttleSleep: failOnThrottle });
 
-/** Keys every usable KSM config carries (the rest are optional / SDK-managed). */
-const REQUIRED_CONFIG_KEYS = [
-  "hostname",
-  "clientId",
-  "privateKey",
-  "appKey",
-] as const;
-
 /**
  * How a pasted KSM config is encoded, as the user chose it in the connect
  * form. Never inferred from the text.
@@ -138,9 +130,9 @@ const badConfig = (reason: string): ServiceError =>
   );
 
 /**
- * Parse `json` as a KSM config object and check it has the keys the SDK
- * needs, so a wrong paste fails with a readable reason instead of deep inside
- * the SDK. `notJson` is the reason given when it doesn't parse.
+ * Parse `json` as a KSM config: it must be a JSON object. Which keys it needs
+ * is the SDK's to judge (pairing validates the config with Keeper before it is
+ * stored). `notJson` is the reason given when it doesn't parse.
  */
 const parseConfigObject = (
   json: string,
@@ -155,14 +147,7 @@ const parseConfigObject = (
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw badConfig("expected a JSON object");
   }
-  const record = parsed as Record<string, unknown>;
-  const missing = REQUIRED_CONFIG_KEYS.filter(
-    (k) => typeof record[k] !== "string",
-  );
-  if (missing.length > 0) {
-    throw badConfig(`missing ${missing.join(", ")}`);
-  }
-  return record;
+  return parsed as Record<string, unknown>;
 };
 
 /**
