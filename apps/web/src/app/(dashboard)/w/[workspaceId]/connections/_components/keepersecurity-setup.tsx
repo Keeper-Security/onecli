@@ -148,7 +148,7 @@ const Notice = ({
   );
 };
 
-/** Method dropdown + credential field + submit, for connecting or reconnecting. */
+/** Method dropdown + credential field + submit. */
 const ConnectForm = ({
   fetchStatus,
   submitLabel,
@@ -256,7 +256,6 @@ export const KeeperSecuritySetup = () => {
 
     return (
       <div className="space-y-6">
-        {/* Connection status */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -320,7 +319,6 @@ export const KeeperSecuritySetup = () => {
           )}
         </Card>
 
-        {/* Danger zone */}
         <Card>
           <CardHeader>
             <CardTitle>Disconnect</CardTitle>
@@ -363,7 +361,6 @@ export const KeeperSecuritySetup = () => {
     );
   }
 
-  // Not paired — connect form
   return (
     <Card>
       <CardHeader>

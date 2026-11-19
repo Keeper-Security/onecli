@@ -3,8 +3,8 @@
 //
 // The gateway proxies the picker to the Node SDK service; field VALUES never
 // cross this boundary, only titles/labels and the `keeper://` reference that
-// resolves each field. Like the 1Password client, these hit the gateway
-// (different base URL + auth), so they use getGatewayFetchOptions().
+// resolves each field. These hit the gateway (different base URL + auth), so
+// they use getGatewayFetchOptions().
 import { getGatewayApiUrl } from "@/hooks/use-vault-status";
 import { getGatewayFetchOptions } from "@/lib/gateway-auth";
 

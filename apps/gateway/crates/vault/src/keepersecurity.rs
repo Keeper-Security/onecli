@@ -1,20 +1,15 @@
 //! Keeper Security (`keepersecurity`) vault provider.
 //!
-//! Owns the connection — the encrypted KSM config stored in
-//! `vault_connection` — plus the per-workspace session and a small resolve cache.
-//! Keeper is **not** a hostname-matched vault racer like Bitwarden; it is a
-//! *value source* for explicit secrets. A secret with `value_source =
-//! "keepersecurity"` carries an `keeper://<record-uid>/field/<name>` reference that the
-//! The `PolicyEngine` (`context`) resolves here at request time
-//! (instead of decrypting a stored `encrypted_value`).
+//! Owns the workspace's connection (the encrypted KSM config in
+//! `vault_connections`) and its in-memory session. Keeper is a *value source*
+//! for explicit secrets (`value_source = "keepersecurity"` with a `keeper://`
+//! reference), resolved at request time; it is not a hostname-matched fallback
+//! The SDK work (validate, resolve, browse records) is
+//! delegated to the Node API via [`super::keepersecurity_api`].
 //!
-//! The actual Keeper SDK work (validate token, resolve `keeper://`, browse
-//! vaults/items/fields for the picker) is delegated to the Node "Keeper SDK
-//! service" via [`super::keepersecurity_api`]; the gateway never runs the `op` CLI.
-//!
-//! A cached session is re-checked against its `vault_connections` row on every
-//! use (see the crate docs), so a disconnect or re-pair made through any
-//! gateway instance retires the token everywhere on the next request.
+//! A cached session is re-checked against its row on every use, so a
+//! disconnect or re-pair made through any gateway instance takes effect
+//! everywhere on the next request.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,8 +43,7 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
 
 // ── Config & session types ──────────────────────────────────────────────
 
-/// Persisted in `vault_connection.connection_data`. Rows written before the
-/// value-source refactor also carry a `mappings` key; serde ignores it.
+/// Persisted in `vault_connection.connection_data`.
 ///
 /// Deliberately no `Debug`/`Clone`: the struct carries only a credential (the
 /// encrypted KSM config), so it must not be `{:?}`-logged or cloned around.
@@ -75,7 +69,6 @@ impl ConfigFormat {
         }
     }
 
-    /// The name the internal API takes.
     fn as_str(self) -> &'static str {
         match self {
             Self::Json => "json",
@@ -132,12 +125,10 @@ struct KeeperSecuritySession {
     /// The row generation this session was loaded at: the session is valid
     /// only while the row still carries it.
     generation: VaultGeneration,
-    /// `keeper://<record-uid>/field/<name>` → resolved value, with positive/negative TTLs.
     ref_cache: DashMap<String, CachedRef>,
     last_used: Mutex<Instant>,
     last_error: Mutex<Option<String>>,
     error_until: Mutex<Option<Instant>>,
-    /// Timestamp of the last successful connectivity check (positive `status` cache).
     last_ok: Mutex<Option<Instant>>,
     /// Keeper refused the application (`access_denied`) on the last call that
     /// reached it. Set by any call (status, resolve, picker), cleared by the
@@ -201,7 +192,6 @@ impl KeeperSecuritySession {
         self.ref_cache.clear();
     }
 
-    /// Keeper accepted a call: whatever refused it before no longer does.
     fn mark_reachable(&self) {
         *self.access_denied.lock().expect("session lock poisoned") = false;
         *self.last_error.lock().expect("session lock poisoned") = None;
@@ -391,13 +381,11 @@ impl KeeperSecurityVaultProvider {
 
     // ── Value-source resolution (the secret-injection path) ──────────────
 
-    /// Resolve an `keeper://<record-uid>/field/<name>` reference to its secret value for a
-    /// workspace's Keeper connection. Cached by `keepersecurity_ref` with the same TTL /
-    /// cooldown as before. Errors classify so the caller can skip the secret the
-    /// same way it skips one whose stored value fails to decrypt.
-    ///
-    /// There is one Keeper connection per workspace, so the reference resolves
-    /// via that workspace's connection (the `workspace_id` session).
+    /// Resolve a `keeper://<record-uid>/field/<name>` reference to its secret
+    /// value through the workspace's Keeper connection (one per workspace).
+    /// Results are cached by reference, and errors are classified so the
+    /// caller can skip the secret the same way it skips one whose stored value
+    /// fails to decrypt.
     pub async fn resolve_ref(
         &self,
         workspace_id: &str,
@@ -502,7 +490,6 @@ impl KeeperSecurityVaultProvider {
         picker_outcome(&session, result)
     }
 
-    /// Load a connected session for picker calls, or 404 if not paired.
     async fn picker_session(
         &self,
         workspace_id: &str,
@@ -810,8 +797,6 @@ mod tests {
 
     #[test]
     fn config_ignores_legacy_mappings() {
-        // Rows written before the value-source refactor carry a `mappings` key.
-        // It must deserialize cleanly (ignored) so existing connections keep working.
         let json = serde_json::json!({
             "encrypted_ksm_config": "iv:tag:ct",
             "mappings": { "api.anthropic.com": "keeper://uid/field/password" },
