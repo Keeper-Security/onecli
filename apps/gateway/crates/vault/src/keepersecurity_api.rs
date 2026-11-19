@@ -70,8 +70,7 @@ const INTERNAL_API_URL_DEFAULT: &str = "http://localhost:10256";
 ///
 /// Deliberately **not** `APP_URL`. That is the *public* URL users browse to —
 /// a different concept, and since it can now name a real external host, using
-/// it here would send in-container vault calls out over the internet. Split out
-/// for testability, as [`super::super::gateway::response::dashboard_url`] is.
+/// it here would send in-container vault calls out over the internet.
 fn resolve_internal_api_url(explicit: Option<&str>) -> String {
     explicit
         .map(str::trim)
@@ -187,13 +186,12 @@ pub async fn resolve(
     Ok(body.value)
 }
 
-/// List the records shared with the KSM application (picker step 1).
+/// List the records shared with the KSM application.
 pub async fn list_records(config: &str) -> Result<serde_json::Value, KeeperSecurityError> {
     list("list-records", &serde_json::json!({ "config": config })).await
 }
 
-/// List a record's referenceable fields — labels and refs, never values
-/// (picker step 2).
+/// List a record's referenceable fields — labels and refs, never values.
 pub async fn list_fields(
     config: &str,
     record_uid: &str,

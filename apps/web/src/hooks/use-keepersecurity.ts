@@ -128,7 +128,7 @@ export const useKeeperSecurityReady = (enabled: boolean) => {
   return { isReady: query.data?.connected ?? false, ...query };
 };
 
-/** Records shared with the KSM application (picker step 1). */
+/** Records shared with the KSM application. */
 export const useKeeperSecurityRecords = (enabled: boolean) =>
   useQuery({
     queryKey: queryKeys.keepersecurity.records(),
@@ -137,7 +137,7 @@ export const useKeeperSecurityRecords = (enabled: boolean) =>
     staleTime: STALE_TIME,
   });
 
-/** A record's referenceable fields (picker step 2). */
+/** A record's referenceable fields. */
 export const useKeeperSecurityFields = (recordUid: string | null) =>
   useQuery({
     queryKey: queryKeys.keepersecurity.fields(recordUid ?? ""),

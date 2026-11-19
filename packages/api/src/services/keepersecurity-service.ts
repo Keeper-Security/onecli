@@ -1,10 +1,9 @@
 /**
  * Keeper Secrets Manager (KSM) SDK service — the only place that talks to Keeper.
  *
- * Mirrors onepassword-service: a stateless `config + keeper:// ref → value`
- * function, plus the picker's record/field listing. The caller sends the
- * (decrypted) KSM config with each call; this service never reads our
- * database. Refs use KSM notation, e.g. `keeper://<record-uid>/field/password`.
+ * A stateless `config + keeper:// ref → value` function, plus the picker's
+ * record/field listing. The caller sends the (decrypted) KSM config with each
+ * call; this service never reads our database. Refs use KSM notation, e.g. `keeper://<record-uid>/field/password`.
  */
 import {
   getFolders,
@@ -369,7 +368,7 @@ const uniqueSelector = (field: RawField, list: RawField[]): string | null => {
  * the whole object would resolve to JSON rather than a usable credential.
  * Fields with no value are left out (a secret pointing at one would resolve
  * empty), though they still count when checking a selector is unique, since
- * Keeper's notation counts them too. Pure — exported for tests.
+ * Keeper's notation counts them too.
  */
 export const listRecordFields = (
   record: Pick<KeeperRecord, "recordUid" | "data">,
@@ -434,7 +433,7 @@ const folderPath = (
   return names.length > 0 ? names.join(" / ") : undefined;
 };
 
-/** List the records shared with the KSM application (picker step 1). */
+/** List the records shared with the KSM application. */
 export const listRecords = async (
   config: string,
 ): Promise<KeeperSecurityRecord[]> => {
