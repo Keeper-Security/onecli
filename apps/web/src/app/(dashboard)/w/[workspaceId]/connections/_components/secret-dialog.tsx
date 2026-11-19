@@ -1287,7 +1287,7 @@ const KeeperSecurityReferenceButton = ({
           variant="outline"
           size="icon"
           onClick={onClick}
-          aria-label="Use a Keeper field"
+          aria-label="Use a Keeper Security field"
           className="size-9 shrink-0 transition-colors hover:border-[#FFC700]/60 hover:bg-[#FFC700]/10"
         >
           <Image
@@ -1298,7 +1298,7 @@ const KeeperSecurityReferenceButton = ({
           />
         </Button>
       </TooltipTrigger>
-      <TooltipContent>Use a Keeper field</TooltipContent>
+      <TooltipContent>Use a Keeper Security field</TooltipContent>
     </Tooltip>
   </TooltipProvider>
 );

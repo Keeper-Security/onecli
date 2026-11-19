@@ -109,7 +109,7 @@ const pasteInto = async (placeholder: string, text: string) => {
 };
 
 const keepersecurityButton = () =>
-  screen.queryByRole("button", { name: "Use a Keeper field" });
+  screen.queryByRole("button", { name: "Use a Keeper Security field" });
 const openPicker = () => userEvent.click(keepersecurityButton() as HTMLElement);
 /** Keeper button → picker → a field. */
 const pickField = async () => {
