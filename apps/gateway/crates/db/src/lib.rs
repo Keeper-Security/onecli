@@ -50,7 +50,7 @@ pub struct SecretRow {
     pub encrypted_value: Option<String>,
     /// `op://vault/item/field` reference, set for 1Password-sourced secrets.
     pub op_ref: Option<String>,
-    /// `keeper://<record-uid>/field/<name>` reference, set for Keeper-sourced secrets.
+    /// `keeper://<record-uid>/field/<name>` reference, set for Keeper-Security-sourced secrets.
     pub keepersecurity_ref: Option<String>,
     pub host_pattern: String,
     pub path_pattern: Option<String>,
