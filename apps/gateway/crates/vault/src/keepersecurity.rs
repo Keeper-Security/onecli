@@ -80,7 +80,10 @@ impl ConfigFormat {
 /// What a `pair` request carries: a ready KSM config in the format the user
 /// chose, or a single-use one-time token (e.g. `US:xxxx`) that must be bound
 /// to a config first.
-#[derive(Debug, PartialEq, Eq)]
+// Holds the raw pasted credential: `Debug` only in tests (for `assert_eq!`),
+// so production code can never `{:?}`-log it.
+#[cfg_attr(test, derive(Debug))]
+#[derive(PartialEq, Eq)]
 enum PairInput<'a> {
     Config(&'a str, ConfigFormat),
     OneTimeToken(&'a str),
