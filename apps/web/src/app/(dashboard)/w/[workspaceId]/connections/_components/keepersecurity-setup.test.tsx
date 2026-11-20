@@ -100,7 +100,9 @@ describe("KeeperSecuritySetup: not connected", () => {
       screen.getByRole("combobox", { name: "Configuration method" }),
     ).toHaveTextContent("One-time access token");
     expect(screen.getByLabelText(TOKEN_LABEL)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("US:...")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("Paste your one-time access token"),
+    ).toBeInTheDocument();
   });
 
   it("lists the three connection methods", async () => {
