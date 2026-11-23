@@ -226,7 +226,7 @@ export const KeeperSecurityPickerDialog = ({
               className="shrink-0"
             />
             <DialogTitle className="text-sm font-semibold">
-              Reference a Keeper field
+              Reference a Keeper Security field
             </DialogTitle>
             <DialogDescription className="sr-only">
               Browse the records shared with your Keeper Secrets Manager
