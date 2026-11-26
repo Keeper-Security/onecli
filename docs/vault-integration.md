@@ -78,7 +78,7 @@ To use this with Anthropic, store your API key as the password in a Bitwarden lo
 
 Setup: **Connections** > **Vaults** > **1Password**, paste a Service Account token, then create secrets that reference vault items (the UI has a vault/item/field picker backed by `GET /v1/vault/onepassword/{vaults,items,fields}`).
 
-## Keeper Security
+## [Keeper Security](https://docs.keeper.io/keeperpam/secrets-manager/integrations/onecli-external-vault)
 
 Keeper Security connects with a [Secrets Manager](https://docs.keeper.io/keeperpam/secrets-manager/overview) application instead of app pairing, and it is not a hostname-matched fallback: it supplies values for secrets you explicitly point at it. A secret with a `keeper://<record-uid>/field/<name>` reference ([Keeper notation](https://docs.keeper.io/en/keeperpam/secrets-manager/about/keeper-notation)) is resolved through the Keeper Secrets Manager SDK at request time, so the value never sits in the OneCLI database. Only the connection's configuration is stored, encrypted, per workspace.
 

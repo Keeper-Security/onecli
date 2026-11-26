@@ -370,7 +370,7 @@ export const KeeperSecuritySetup = () => {
           configuration to resolve secrets on-demand.{" "}
           {/* TODO: Add a link of keepersecurity onecli gitbook docs link below */}
           <a
-            href="https://docs.keeper.io/keeperpam/secrets-manager/integrations"
+            href="https://docs.keeper.io/keeperpam/secrets-manager/integrations/onecli-external-vault"
             target="_blank"
             rel="noopener noreferrer"
             className="text-foreground inline-flex items-center gap-0.5 underline underline-offset-2 hover:no-underline"
